@@ -1,0 +1,174 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #0b0b0d;
+  --ink-raised: #131316;
+  --ink-card: #17171b;
+  --parchment: #e9e1cd;
+  --parchment-dim: #b9b2a0;
+  --parchment-faint: #7d786b;
+  --platinum: #aeb4bc;
+  --platinum-line: rgba(174, 180, 188, 0.18);
+  --platinum-line-strong: rgba(174, 180, 188, 0.38);
+  --bull: #5f8a6b;
+  --bear: #9a5a55;
+  --warn: #b08d57;
+}
+
+@theme inline {
+  --color-ink: var(--ink);
+  --color-ink-raised: var(--ink-raised);
+  --color-ink-card: var(--ink-card);
+  --color-parchment: var(--parchment);
+  --color-parchment-dim: var(--parchment-dim);
+  --color-parchment-faint: var(--parchment-faint);
+  --color-platinum: var(--platinum);
+  --color-line: var(--platinum-line);
+  --color-line-strong: var(--platinum-line-strong);
+  --color-bull: var(--bull);
+  --color-bear: var(--bear);
+  --color-warn: var(--warn);
+  --font-serif: var(--font-cormorant), Georgia, serif;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+}
+
+body {
+  background: var(--ink);
+  color: var(--parchment);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/* Subtle owl-eye / alpha watermark */
+.noctua-watermark::before {
+  content: "α";
+  position: fixed;
+  right: -4rem;
+  bottom: -10rem;
+  font-family: var(--font-cormorant), Georgia, serif;
+  font-size: 38rem;
+  line-height: 1;
+  color: rgba(174, 180, 188, 0.025);
+  pointer-events: none;
+  user-select: none;
+  z-index: 0;
+}
+
+.card {
+  background: var(--ink-card);
+  border: 1px solid var(--platinum-line);
+  border-radius: 2px;
+  transition: border-color 0.2s ease;
+}
+
+a.card:hover,
+.card:has(> a:hover) {
+  border-color: var(--platinum-line-strong);
+}
+
+.btn {
+  font-family: var(--font-plex-mono), monospace;
+  font-size: 0.6875rem;
+  letter-spacing: 0.18em;
+  border: 1px solid var(--platinum-line-strong);
+  color: var(--parchment);
+  padding: 0.55rem 1rem;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  cursor: pointer;
+}
+.btn:hover { background: var(--ink-card); }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-primary { border-color: var(--parchment-dim); }
+.btn-primary:hover { background: rgba(233, 225, 205, 0.06); }
+.btn-danger { border-color: rgba(154, 90, 85, 0.6); color: var(--bear); }
+.btn-danger:hover { background: rgba(154, 90, 85, 0.08); }
+.btn-bull { border-color: rgba(95, 138, 107, 0.6); color: var(--bull); }
+.btn-bull:hover { background: rgba(95, 138, 107, 0.08); }
+
+:focus-visible {
+  outline: 1px solid var(--parchment-dim);
+  outline-offset: 1px;
+}
+
+select, input[type="text"], textarea {
+  border-radius: 0;
+}
+
+.card-rule {
+  border-top: 1px solid var(--platinum-line);
+}
+
+h1, h2, h3, .serif {
+  font-family: var(--font-cormorant), Georgia, serif;
+  letter-spacing: 0.01em;
+}
+
+.label {
+  font-family: var(--font-plex-mono), monospace;
+  font-size: 0.625rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--parchment-faint);
+}
+
+.fin {
+  font-family: var(--font-plex-mono), monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Parchment document styling for IC memos */
+.parchment-doc {
+  background: linear-gradient(175deg, #ece4d0 0%, #e4dbc4 100%);
+  color: #211d14;
+  border: 1px solid rgba(174, 180, 188, 0.4);
+  border-radius: 2px;
+}
+
+.parchment-doc h1,
+.parchment-doc h2,
+.parchment-doc h3 {
+  color: #17140d;
+}
+
+.parchment-doc .label {
+  color: #6e6a5d;
+}
+
+/* Dotted canvas grid for the Research Graph */
+.dot-grid {
+  background-color: var(--ink);
+  background-image: radial-gradient(rgba(174, 180, 188, 0.13) 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+
+@keyframes node-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(1); }
+  50% { opacity: 0.08; transform: scale(1.22); }
+}
+.node-pulse {
+  animation: node-pulse 3.2s ease-in-out infinite;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-up { animation: fade-up 0.5s ease both; }
+
+::selection {
+  background: rgba(174, 180, 188, 0.25);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(174, 180, 188, 0.15);
+  border-radius: 0;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
