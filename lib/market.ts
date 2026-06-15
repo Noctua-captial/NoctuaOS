@@ -1,7 +1,11 @@
 // Live market quotes — keyless. Yahoo chart endpoint primary, then CBOE's
 // delayed-quotes options endpoint (price only, no history series), then Stooq
 // (CSV download, then the historical-quotes HTML table behind Stooq's
-// SHA-256 proof-of-work challenge, which we solve inline).
+// SHA-256 proof-of-work challenge, which we solve inline). Chained sources fail
+// fast (no per-source retries) so a rate-limited source falls through to the
+// next immediately — the chain itself is the retry. CBOE-price merges the
+// cached history when one exists; on a cold cache the quote goes out with an
+// empty history and callers handle the short series.
 // Cached in the `quotes` table with a ~10-minute TTL; stale cache served on fetch failure.
 import { createHash } from "crypto";
 import { eq } from "drizzle-orm";
@@ -74,6 +78,7 @@ async function fetchYahoo(ticker: string): Promise<Fetched> {
   const res = await fetchExternal(url, {
     headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
     timeoutMs: FETCH_TIMEOUT_MS,
+    retries: 0, // a 429 won't clear in seconds — fall through to the next source
   });
   if (!res.ok) throw new Error(`Yahoo chart fetch failed (${res.status}) for ${ticker}`);
   const data = await res.json();
@@ -121,6 +126,7 @@ export async function fetchCboe(ticker: string): Promise<Fetched> {
   const res = await fetchExternal(url, {
     headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
     timeoutMs: FETCH_TIMEOUT_MS,
+    retries: 0, // chained fallback — fail fast to the next source
   });
   if (!res.ok) throw new Error(`CBOE quote fetch failed (${res.status}) for ${t}`);
   const data = (await res.json())?.data;
@@ -335,17 +341,12 @@ export async function getQuote(ticker: string): Promise<Quote | null> {
     return rowToQuote(cached, true);
   }
 
-  // With a stale cache available, cap the refresh attempt so page renders
-  // never wait out a tarpitted source; the stale row is served instead.
-  let fetched: Fetched | null;
-  if (cached) {
-    fetched = await Promise.race([
-      attempt(),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 9_000)),
-    ]);
-  } else {
-    fetched = await attempt();
-  }
+  // Cap the refresh attempt so a tarpitted source can never wait out a page
+  // render. With a stale cache we cap tighter (serve the stale row); on a cold
+  // cache we allow a bit longer for a legitimate first fetch, but still bound it
+  // so an unreachable/tarpitting chain returns rather than hanging for ~minutes.
+  const cap = (ms: number) => new Promise<null>((resolve) => setTimeout(() => resolve(null), ms));
+  let fetched: Fetched | null = await Promise.race([attempt(), cap(cached ? 9_000 : 15_000)]);
 
   if (!fetched) lastFailureAt.set(t, Date.now());
   else lastFailureAt.delete(t);
@@ -400,6 +401,7 @@ async function fetchFredSp500(): Promise<Fetched> {
   const res = await fetchExternal("https://fred.stlouisfed.org/graph/fredgraph.csv?id=SP500", {
     headers: { "User-Agent": BROWSER_UA },
     timeoutMs: FETCH_TIMEOUT_MS,
+    retries: 0, // primary benchmark source; the SPY fallback is the retry
   });
   if (!res.ok) throw new Error(`FRED SP500 fetch failed (${res.status})`);
   const csv = await res.text();
