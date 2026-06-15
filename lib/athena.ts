@@ -1,5 +1,6 @@
-import { generateObject, type LanguageModel } from "ai";
+import { type LanguageModel } from "ai";
 import { z } from "zod";
+import { generateObjectRetry } from "@/lib/ai";
 
 export const CONSTITUTION = `You are part of Noctua OS, the internal decision-intelligence system of Noctua Capital — a quiet, predatory, institutional fund focused on undercovered public-market opportunities: small-cap technology, semiconductors, AI infrastructure bottlenecks, data-center power, memory, custom silicon, and overlooked technical supply chains.
 
@@ -183,23 +184,29 @@ function withVault(prompt: string, vaultCtx: string): string {
   return vaultCtx ? `${vaultCtx}\n\n========\n\n${prompt}` : prompt;
 }
 
+/** Analyst-supplied notes flow straight into the dossier prompt. Strip control
+ *  characters and cap the length so free-text input can't blow up the prompt or
+ *  smuggle large instruction payloads. */
+export function sanitizeNotes(notes: string, max = 600): string {
+  return notes.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
 export async function runDossierAgent(model: LanguageModel, ticker: string, vaultCtx: string, notes?: string) {
-  const { object } = await generateObject({
+  return generateObjectRetry({
     model,
     schema: dossierSchema,
     system: CONSTITUTION,
     prompt: withVault(
-      `Athena has opened an investigation on ticker ${ticker}.${notes ? ` Analyst context: ${notes}` : ""}
+      `Athena has opened an investigation on ticker ${ticker}.${notes ? ` Analyst context: ${sanitizeNotes(notes)}` : ""}
 
 Act as the Dossier Agent and Thesis Agent. Build the dossier and the cleanest possible bull case under the Noctua Constitution. Ground claims in Vault excerpts where provided. Produce your research trace.`,
       vaultCtx,
     ),
   });
-  return object;
 }
 
 export async function runAccountingAgent(model: LanguageModel, ticker: string, dossier: DossierResult, vaultCtx: string) {
-  const { object } = await generateObject({
+  return generateObjectRetry({
     model,
     schema: accountingSchema,
     system: CONSTITUTION,
@@ -212,11 +219,10 @@ Hunt for what would make this thesis a trap: dilution, revenue quality issues, w
       vaultCtx,
     ),
   });
-  return object;
 }
 
 export async function runIndustryAgent(model: LanguageModel, ticker: string, dossier: DossierResult, vaultCtx: string) {
-  const { object } = await generateObject({
+  return generateObjectRetry({
     model,
     schema: industrySchema,
     system: CONSTITUTION,
@@ -229,11 +235,10 @@ Assess technical reality: supply chain position, who holds pricing leverage, com
       vaultCtx,
     ),
   });
-  return object;
 }
 
 export async function runCatalystAgent(model: LanguageModel, ticker: string, dossier: DossierResult, vaultCtx: string) {
-  const { object } = await generateObject({
+  return generateObjectRetry({
     model,
     schema: catalystSchema,
     system: CONSTITUTION,
@@ -247,11 +252,10 @@ Map every event that could force the market to reprice this name: earnings, guid
       vaultCtx,
     ),
   });
-  return object;
 }
 
 export async function runValuationAgent(model: LanguageModel, ticker: string, dossier: DossierResult, vaultCtx: string) {
-  const { object } = await generateObject({
+  return generateObjectRetry({
     model,
     schema: valuationSchema,
     system: CONSTITUTION,
@@ -264,7 +268,6 @@ Build bear / base / bull cases. State the value logic, not just numbers — what
       vaultCtx,
     ),
   });
-  return object;
 }
 
 export async function runStrix(
@@ -274,7 +277,7 @@ export async function runStrix(
   reports: { accounting: AccountingResult; industry: IndustryResult; catalyst: CatalystResult; valuation: ValuationResult },
   vaultCtx: string,
 ) {
-  const { object } = await generateObject({
+  return generateObjectRetry({
     model,
     schema: strixSchema,
     system: CONSTITUTION,
@@ -305,7 +308,6 @@ Attack everything. Exploit every weakness the bench surfaced and find the ones i
       vaultCtx,
     ),
   });
-  return object;
 }
 
 export async function runEvidenceAuditor(
@@ -314,7 +316,7 @@ export async function runEvidenceAuditor(
   allClaims: { text: string; kind: string; confidence: number; source: string }[],
   vaultCtx: string,
 ) {
-  const { object } = await generateObject({
+  return generateObjectRetry({
     model,
     schema: auditorSchema,
     system: CONSTITUTION,
@@ -330,7 +332,6 @@ Produce your research trace.`,
       vaultCtx,
     ),
   });
-  return object;
 }
 
 export async function runSynthesis(
@@ -368,7 +369,7 @@ The debate verdict is the committee's strongest signal — your recommendation m
 `
     : "";
 
-  const { object } = await generateObject({
+  return generateObjectRetry({
     model,
     schema: synthesisSchema,
     system: CONSTITUTION,
@@ -387,5 +388,4 @@ Produce the Noctua Score (be stingy — most ideas land 40-74; 75+ requires genu
 
 Recommendation discipline: "approve" only if the idea survives Strix with asymmetry intact AND the evidence audit holds; "more_work" is the default; "reject" if Constitution rejection criteria apply. Produce your research trace.`,
   });
-  return object;
 }

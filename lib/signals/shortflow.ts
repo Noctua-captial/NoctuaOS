@@ -5,6 +5,7 @@
 // in a scan); per-ticker daily ratios persist as "short_pressure" signal rows
 // so trend and z-score build from real stored history.
 import { FETCH_TIMEOUT_MS, meanStd, signalHistory, upsertSignal } from "@/lib/signals/common";
+import { fetchExternal } from "@/lib/net";
 
 const WALK_BACK_DAYS = 5; // attempts beyond today: covers a long weekend + holiday
 const MISS_RETRY_MS = 30 * 60 * 1000; // re-check a missing day's file after 30 minutes
@@ -65,8 +66,8 @@ async function loadDay(yyyymmdd: string): Promise<Map<string, FileRow> | null> {
 
   let res: Response;
   try {
-    res = await fetch(`https://cdn.finra.org/equity/regsho/daily/CNMSshvol${yyyymmdd}.txt`, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    res = await fetchExternal(`https://cdn.finra.org/equity/regsho/daily/CNMSshvol${yyyymmdd}.txt`, {
+      timeoutMs: FETCH_TIMEOUT_MS,
     });
   } catch {
     missAt.set(yyyymmdd, Date.now());

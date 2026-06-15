@@ -5,11 +5,13 @@
 // status text, then refreshes the page data when the sweep completes.
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useToast } from "@/components/toast";
 
 type ScanEvent = { stage: string; message: string; ticker?: string };
 
 export function ScanButton({ lastScanAt }: { lastScanAt: string | null }) {
   const router = useRouter();
+  const { toast } = useToast();
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -27,11 +29,14 @@ export function ScanButton({ lastScanAt }: { lastScanAt: string | null }) {
       if (contentType.includes("application/json")) {
         // Throttled path — the route declined to run.
         const body = (await res.json()) as { message?: string };
-        setStatus(body.message ?? "Scan skipped.");
+        const msg = body.message ?? "Scan skipped.";
+        setStatus(msg);
+        toast(msg, "info");
         return;
       }
       if (!res.ok || !res.body) {
         setStatus(`Scan failed (${res.status}).`);
+        toast(`Night Vision scan failed (${res.status}).`, "error");
         return;
       }
       const reader = res.body.getReader();
@@ -54,8 +59,10 @@ export function ScanButton({ lastScanAt }: { lastScanAt: string | null }) {
         }
       }
       router.refresh();
+      toast("Night Vision sweep complete.", "success");
     } catch {
       setStatus("Scan failed — Night Vision unreachable.");
+      toast("Night Vision unreachable.", "error");
     } finally {
       setRunning(false);
     }

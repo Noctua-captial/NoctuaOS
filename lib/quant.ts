@@ -46,8 +46,41 @@ function dailyReturns(closes: number[]): number[] {
   return out;
 }
 
-function mean(xs: number[]): number {
+export function mean(xs: number[]): number {
+  if (xs.length === 0) return 0; // guard: empty input must not yield NaN
   return xs.reduce((s, x) => s + x, 0) / xs.length;
+}
+
+/** Conservative fill for pairwise correlations that can't be estimated (e.g. a
+ *  zero-variance series). Treating unknown ρ as 0 understates book risk by
+ *  assuming a diversification benefit we haven't measured; assume positive
+ *  co-movement instead. Override via NOCTUA_BOOK_UNKNOWN_CORR. */
+export const UNKNOWN_CORR = (() => {
+  const v = Number(process.env.NOCTUA_BOOK_UNKNOWN_CORR);
+  return Number.isFinite(v) && v >= -1 && v <= 1 ? v : 0.5;
+})();
+
+/**
+ * Annualized book volatility √(Σᵢⱼ wᵢwⱼσᵢσⱼρᵢⱼ). Diagonal ρ = 1; unestimable
+ * off-diagonal ρ falls back to `unknownCorr` (conservative, not 0). Null on
+ * shape mismatch.
+ */
+export function bookVolatility(
+  weights: number[],
+  vols: number[],
+  corr: (number | null)[][],
+  unknownCorr: number = UNKNOWN_CORR,
+): number | null {
+  const n = weights.length;
+  if (n === 0 || vols.length !== n || corr.length !== n) return null;
+  let varAcc = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const rho = i === j ? 1 : (corr[i][j] ?? unknownCorr);
+      varAcc += weights[i] * weights[j] * vols[i] * vols[j] * rho;
+    }
+  }
+  return Math.sqrt(Math.max(varAcc, 0));
 }
 
 function sampleVariance(xs: number[]): number {
@@ -353,19 +386,13 @@ export async function computeBookQuant(): Promise<BookQuant> {
     weightedBeta = any ? acc : null;
   }
 
-  // Book vol: √(Σᵢⱼ wᵢwⱼσᵢσⱼρᵢⱼ); unknown off-diagonal ρ treated as 0.
+  // Book vol: √(Σᵢⱼ wᵢwⱼσᵢσⱼρᵢⱼ); unestimable off-diagonal ρ uses the
+  // conservative UNKNOWN_CORR fill rather than 0 (see bookVolatility).
   let bookAnnualizedVol: number | null = null;
   if (priced.length > 0) {
     const vols = priced.map((t) => annualizedVolOf(returnsByTicker.get(t)!) ?? 0);
     const weights = priced.map((t) => (sizeByTicker.get(t) ?? 0) / 100);
-    let varAcc = 0;
-    for (let i = 0; i < priced.length; i++) {
-      for (let j = 0; j < priced.length; j++) {
-        const rho = i === j ? 1 : (matrix[i][j] ?? 0);
-        varAcc += weights[i] * weights[j] * vols[i] * vols[j] * rho;
-      }
-    }
-    bookAnnualizedVol = Math.sqrt(Math.max(varAcc, 0));
+    bookAnnualizedVol = bookVolatility(weights, vols, matrix);
   }
 
   // Worst live P&L vs entry across priced positions.

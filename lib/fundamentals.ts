@@ -4,11 +4,12 @@
 import { eq } from "drizzle-orm";
 import { db, tables } from "@/db";
 import { tickerToCik } from "@/lib/edgar";
+import { fetchSec } from "@/lib/net";
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 
 // Same User-Agent pattern as lib/edgar.ts — SEC requires a descriptive UA.
-const UA = process.env.EDGAR_USER_AGENT ?? "NoctuaOS research internal@noctua.local";
+const UA = process.env.EDGAR_USER_AGENT ?? "NoctuaOS/0.1 (contact: set EDGAR_USER_AGENT)";
 const headers = { "User-Agent": UA, "Accept-Encoding": "gzip" };
 
 export type Fundamentals = {
@@ -98,7 +99,7 @@ async function fetchFromEdgar(ticker: string): Promise<Omit<Fundamentals, "fetch
   const entry = await tickerToCik(ticker);
   if (!entry) return null;
   const cik10 = String(entry.cik_str).padStart(10, "0");
-  const res = await fetch(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik10}.json`, { headers });
+  const res = await fetchSec(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik10}.json`, headers);
   if (!res.ok) throw new Error(`EDGAR companyfacts fetch failed (${res.status}) for ${ticker}`);
   const data = await res.json();
   const facts: Facts = data?.facts ?? {};

@@ -3,6 +3,8 @@ import { Geist, Cormorant_Garamond, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { Sidebar } from "@/components/sidebar";
 import { CommandBar } from "@/components/command-bar";
+import { ToastProvider } from "@/components/toast";
+import { authEnabled } from "@/lib/auth";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -37,11 +39,13 @@ export default function RootLayout({
       className={`${geistSans.variable} ${cormorant.variable} ${plexMono.variable} h-full antialiased`}
     >
       <body className="noctua-watermark min-h-full">
-        <div className="flex min-h-screen">
-          <Sidebar />
-          <main className="relative z-10 flex-1 overflow-x-hidden">{children}</main>
-        </div>
-        <CommandBar />
+        <ToastProvider>
+          <div className="flex min-h-screen">
+            <Sidebar authEnabled={authEnabled()} />
+            <main className="relative z-10 flex-1 overflow-x-hidden">{children}</main>
+          </div>
+          <CommandBar />
+        </ToastProvider>
       </body>
     </html>
   );

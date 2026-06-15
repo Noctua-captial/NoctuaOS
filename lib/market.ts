@@ -1,16 +1,25 @@
 // Live market quotes — keyless. Yahoo chart endpoint primary, then CBOE's
 // delayed-quotes options endpoint (price only, no history series), then Stooq
 // (CSV download, then the historical-quotes HTML table behind Stooq's
-// SHA-256 proof-of-work challenge, which we solve inline).
+// SHA-256 proof-of-work challenge, which we solve inline). Chained sources fail
+// fast (no per-source retries) so a rate-limited source falls through to the
+// next immediately — the chain itself is the retry. CBOE-price merges the
+// cached history when one exists; on a cold cache the quote goes out with an
+// empty history and callers handle the short series.
 // Cached in the `quotes` table with a ~10-minute TTL; stale cache served on fetch failure.
 import { createHash } from "crypto";
 import { eq } from "drizzle-orm";
 import { db, tables } from "@/db";
+import { fetchExternal } from "@/lib/net";
 
 const TTL_MS = 10 * 60 * 1000;
 const HISTORY_DAYS = 504; // ~2 years of trading sessions
 const AVG_VOLUME_DAYS = 60;
 const FETCH_TIMEOUT_MS = 8_000; // Stooq tarpits rate-limited IPs; never hang a page on it
+// Cap Stooq's SHA-256 proof-of-work search so a too-hard challenge can never
+// pin the event loop. ~16^d expected hashes for d leading zeros; give up and
+// fall through to cached/other sources past this bound.
+const MAX_POW_ITERS = 5_000_000;
 
 const BROWSER_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -66,9 +75,10 @@ async function fetchYahoo(ticker: string): Promise<Fetched> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     ticker,
   )}?range=2y&interval=1d`;
-  const res = await fetch(url, {
+  const res = await fetchExternal(url, {
     headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    timeoutMs: FETCH_TIMEOUT_MS,
+    retries: 0, // a 429 won't clear in seconds — fall through to the next source
   });
   if (!res.ok) throw new Error(`Yahoo chart fetch failed (${res.status}) for ${ticker}`);
   const data = await res.json();
@@ -113,9 +123,10 @@ async function fetchYahoo(ticker: string): Promise<Fetched> {
 export async function fetchCboe(ticker: string): Promise<Fetched> {
   const t = ticker.toUpperCase();
   const url = `https://cdn.cboe.com/api/global/delayed_quotes/options/${encodeURIComponent(t)}.json`;
-  const res = await fetch(url, {
+  const res = await fetchExternal(url, {
     headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    timeoutMs: FETCH_TIMEOUT_MS,
+    retries: 0, // chained fallback — fail fast to the next source
   });
   if (!res.ok) throw new Error(`CBOE quote fetch failed (${res.status}) for ${t}`);
   const data = (await res.json())?.data;
@@ -163,9 +174,11 @@ function stooqSaveCookies(res: Response) {
 }
 
 async function stooqGet(url: string): Promise<Response> {
-  const res = await fetch(url, {
+  // retries:0 — Stooq tarpits; let the source fallback chain handle failure.
+  const res = await fetchExternal(url, {
     headers: { "User-Agent": BROWSER_UA, Cookie: stooqCookieHeader() },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    timeoutMs: FETCH_TIMEOUT_MS,
+    retries: 0,
   });
   stooqSaveCookies(res);
   return res;
@@ -178,8 +191,10 @@ async function stooqSolveChallenge(html: string): Promise<boolean> {
   const c = m[1];
   const target = "0".repeat(Number(m[2]));
   let n = 0;
-  while (!createHash("sha256").update(c + n).digest("hex").startsWith(target)) n++;
-  const res = await fetch("https://stooq.com/__verify", {
+  while (!createHash("sha256").update(c + n).digest("hex").startsWith(target)) {
+    if (++n > MAX_POW_ITERS) return false; // challenge too hard — give up, don't block
+  }
+  const res = await fetchExternal("https://stooq.com/__verify", {
     method: "POST",
     headers: {
       "User-Agent": BROWSER_UA,
@@ -187,7 +202,8 @@ async function stooqSolveChallenge(html: string): Promise<boolean> {
       Cookie: stooqCookieHeader(),
     },
     body: `c=${encodeURIComponent(c)}&n=${n}`,
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    timeoutMs: FETCH_TIMEOUT_MS,
+    retries: 0,
   });
   stooqSaveCookies(res);
   return res.ok;
@@ -325,17 +341,12 @@ export async function getQuote(ticker: string): Promise<Quote | null> {
     return rowToQuote(cached, true);
   }
 
-  // With a stale cache available, cap the refresh attempt so page renders
-  // never wait out a tarpitted source; the stale row is served instead.
-  let fetched: Fetched | null;
-  if (cached) {
-    fetched = await Promise.race([
-      attempt(),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 9_000)),
-    ]);
-  } else {
-    fetched = await attempt();
-  }
+  // Cap the refresh attempt so a tarpitted source can never wait out a page
+  // render. With a stale cache we cap tighter (serve the stale row); on a cold
+  // cache we allow a bit longer for a legitimate first fetch, but still bound it
+  // so an unreachable/tarpitting chain returns rather than hanging for ~minutes.
+  const cap = (ms: number) => new Promise<null>((resolve) => setTimeout(() => resolve(null), ms));
+  let fetched: Fetched | null = await Promise.race([attempt(), cap(cached ? 9_000 : 15_000)]);
 
   if (!fetched) lastFailureAt.set(t, Date.now());
   else lastFailureAt.delete(t);
@@ -387,9 +398,10 @@ export async function getQuote(ticker: string): Promise<Quote | null> {
 const FRED_TTL_MS = 12 * 60 * 60 * 1000;
 
 async function fetchFredSp500(): Promise<Fetched> {
-  const res = await fetch("https://fred.stlouisfed.org/graph/fredgraph.csv?id=SP500", {
+  const res = await fetchExternal("https://fred.stlouisfed.org/graph/fredgraph.csv?id=SP500", {
     headers: { "User-Agent": BROWSER_UA },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    timeoutMs: FETCH_TIMEOUT_MS,
+    retries: 0, // primary benchmark source; the SPY fallback is the retry
   });
   if (!res.ok) throw new Error(`FRED SP500 fetch failed (${res.status})`);
   const csv = await res.text();

@@ -10,6 +10,7 @@ import { db, tables } from "@/db";
 import { modelFor } from "@/lib/models";
 import { traceSchema } from "@/lib/athena";
 import { FETCH_TIMEOUT_MS, upsertSignal } from "@/lib/signals/common";
+import { fetchExternal } from "@/lib/net";
 
 const FEED_TTL_MS = 10 * 60 * 1000;
 const MAX_ITEMS_PER_FETCH = 30;
@@ -107,9 +108,9 @@ async function loadFeed(ticker: string, companyName?: string): Promise<FeedItem[
 
   const query = [ticker, companyName, "stock"].filter(Boolean).join(" ");
   const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
-  const res = await fetch(url, {
+  const res = await fetchExternal(url, {
     headers: { "User-Agent": UA },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    timeoutMs: FETCH_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(`News RSS fetch failed (${res.status}) for ${ticker}`);
   const items = parseRss(await res.text());

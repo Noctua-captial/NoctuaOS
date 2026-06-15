@@ -67,17 +67,29 @@ Each agent emits a research trace (stored in `traces`) and a full report (stored
 ## Stack
 
 - Next.js (App Router) + Tailwind v4
-- SQLite + Drizzle ORM (`noctua.db` in repo root, gitignored data file)
+- **Supabase Postgres + Drizzle ORM** (postgres-js over the Supavisor transaction pooler; serverless-safe). Full-text retrieval uses a generated `tsvector` column + GIN index.
+- Deployed on **Vercel** (functions pinned to `iad1` to colocate with Supabase `us-east-1`).
 - Vercel AI SDK — multi-model router (`lib/models.ts`): xAI / Anthropic / OpenAI per agent, with key-availability fallback chains
 
 ## Setup
 
 ```bash
 npm install
-npx drizzle-kit push      # create schema
-npx tsx db/seed.ts        # seed example dossiers (TSEM, MU, AEHR, APLD, LEU)
+# .env.local must contain DATABASE_URL (Supabase session-pooler URL — see .env.example)
+npm run db:push      # apply the full Drizzle schema (tables, the chunks.tsv FTS column + GIN index, lookup indexes)
+npm run db:seed      # seed example dossiers (TSEM, MU, AEHR, APLD, LEU)
 npm run dev
 ```
+
+`db/index.ts` reads `DATABASE_URL` (falls back to `POSTGRES_URL`). TLS is auto-enabled for Supabase hosts. The schema (`db/schema.ts` + `drizzle/`) is the complete source of truth — including the generated `tsvector` column and indexes — so `db:push`/`drizzle-kit migrate` reproduce Vault full-text search on a fresh database. Row Level Security is **not** part of the Drizzle schema; for a brand-new database apply it (and the least-privilege app role) separately — see "Deploy". The existing `noctua-os` Supabase project is already fully provisioned (schema, FTS, indexes, RLS, seed data), so you only need to set `DATABASE_URL`.
+
+## Deploy (Vercel + Supabase)
+
+1. **Supabase** — create/keep a project (this one: `noctua-os`, region `us-east-1`). The schema lives in `drizzle/` and is applied via `npm run db:push` (or the committed migrations). The app connects through the **transaction pooler** as a least-privilege role (`noctua_web`); **Row Level Security is enabled on every table** with a policy granting that role access, so the public anon key cannot read or write.
+2. **Vercel** — import the repo (framework auto-detected as Next.js). In **Project Settings → Environment Variables**, set for **Production, Preview, and Development**:
+   - `DATABASE_URL` = a Supabase **pooler** connection string (`…pooler.supabase.com`). Required. **Prefer the Session pooler (`:5432`).** Both poolers work with the default pool size (`NOCTUA_PG_MAX`, 10) for typical Vercel usage (one request per instance), but the app fans out several queries per request — and the *transaction* pooler (`:6543`) poisons its connection pool if concurrent queries ever exceed `max` (e.g. multiple in‑flight requests on one warm instance), whereas the *session* pooler queues the overflow cleanly. `db/index.ts` auto‑enables TLS and sizes the pool via `NOCTUA_PG_MAX`. Do **not** use the direct host `db.<ref>.supabase.co` (IPv6‑only, unreachable from Vercel).
+   - Optional: provider keys (`XAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`), `EDGAR_USER_AGENT`, and `NOCTUA_ACCESS_TOKEN` (locks the whole terminal behind a sign-in when set).
+3. Push to the production branch (`main`); Vercel builds and deploys. `vercel.json` pins functions to `iad1`. Verify with `GET /api/health/db` (returns `{ ok: true }` when the database is reachable).
 
 ### AI pipeline
 
@@ -93,8 +105,6 @@ NOCTUA_MODEL_STRIX=grok-4.1-fast
 ```
 
 `/lab` shows key status, the routing table, and recent runs per model.
-
-Note: the current `.env.local` was copied from `~/.env` but that key is **expired** — replace it before running investigations.
 
 Draft research is generated from model knowledge, not live filings. The system enforces evidence discipline (anything time-sensitive must be classified `unverified` with reduced confidence) — human verification is required before capital is committed.
 

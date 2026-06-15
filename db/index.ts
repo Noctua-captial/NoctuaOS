@@ -1,28 +1,49 @@
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import * as schema from "./schema";
-import path from "path";
 
-const dbPath = process.env.NOCTUA_DB_PATH ?? path.join(process.cwd(), "noctua.db");
+// Supabase Postgres via the Supavisor transaction pooler (serverless-safe).
+// `prepare: false` is REQUIRED for the transaction pooler (it can't keep
+// prepared statements across pooled connections). Keep the pool small — each
+// serverless instance opens its own connections behind the pooler.
+const connectionString =
+  process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.POSTGRES_PRISMA_URL ?? "";
 
-const sqlite = new Database(dbPath);
-sqlite.pragma("journal_mode = WAL");
+// Supabase (pooler and direct) requires TLS. postgres-js does NOT enable SSL by
+// default, so a connection string without an explicit `sslmode` would fail the
+// handshake. Auto-enable `require` (encrypt without CA verification — the
+// pooler presents a Supabase-managed cert) for Supabase hosts when the URL
+// doesn't already specify a mode, while leaving local/non-Supabase Postgres
+// (e.g. plain localhost in tests) untouched.
+function sslFor(cs: string): "require" | undefined {
+  if (/[?&]sslmode=/i.test(cs)) return undefined; // honor an explicit URL setting
+  return /\bsupabase\.(co|com)\b/i.test(cs) ? "require" : undefined;
+}
 
-// FTS5 index over chunks for keyword retrieval (works with no API key).
-sqlite.exec(`
-  CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    text,
-    content='chunks',
-    content_rowid='id'
-  );
-  CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
-  END;
-  CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
-  END;
-`);
+// Pool sizing matters: pages and the export route issue several queries in a
+// single `Promise.all`, and streaming routes can run concurrently on a warm
+// instance. If concurrent queries ever exceed `max`, postgres-js queues the
+// overflow — and on the Supabase *transaction* pooler (port 6543) that queuing
+// poisons the pool (subsequent queries hang). Two mitigations:
+//   1) Keep `max` comfortably above the per-request fan-out (default 10).
+//   2) Prefer the *session* pooler (port 5432), which queues overflow cleanly.
+// See README "Deploy" for the recommended connection string.
+function makeClient() {
+  return postgres(connectionString, {
+    prepare: false,
+    ssl: sslFor(connectionString),
+    max: Number(process.env.NOCTUA_PG_MAX ?? 10),
+    idle_timeout: 20,
+    max_lifetime: 60 * 30,
+    connect_timeout: 15,
+  });
+}
 
-export const sqliteRaw = sqlite;
-export const db = drizzle(sqlite, { schema });
+// Reuse one client across HMR reloads (dev) and warm serverless invocations so
+// we don't exhaust connections.
+const globalForDb = globalThis as unknown as { __noctuaPg?: ReturnType<typeof makeClient> };
+export const sqlClient = globalForDb.__noctuaPg ?? makeClient();
+if (process.env.NODE_ENV !== "production") globalForDb.__noctuaPg = sqlClient;
+
+export const db = drizzle(sqlClient, { schema });
 export * as tables from "./schema";

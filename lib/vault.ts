@@ -1,7 +1,7 @@
-import { eq, inArray } from "drizzle-orm";
-import { db, tables, sqliteRaw } from "@/db";
-import { createOpenAI } from "@ai-sdk/openai";
+import { eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { db, tables } from "@/db";
 import { embedMany, embed } from "ai";
+import { embeddingModelFor } from "@/lib/models";
 
 // ---------- chunking ----------
 export function chunkText(text: string, target = 1800, overlap = 200): string[] {
@@ -20,11 +20,11 @@ export function chunkText(text: string, target = 1800, overlap = 200): string[] 
   return chunks.filter((c) => c.length > 80);
 }
 
-// ---------- embeddings (optional — activates when OPENAI_API_KEY is valid) ----------
+// ---------- embeddings (optional — resolved through the model router) ----------
+// The embedding model is configured in lib/models.ts (ROUTING.embeddings) and
+// overridable via NOCTUA_MODEL_EMBEDDINGS, rather than being hardcoded here.
 function embedder() {
-  if (!process.env.OPENAI_API_KEY) return null;
-  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  return openai.textEmbedding("text-embedding-3-small");
+  return embeddingModelFor()?.model ?? null;
 }
 
 async function tryEmbedMany(texts: string[]): Promise<(number[] | null)[]> {
@@ -49,7 +49,7 @@ export async function storeDocument(opts: {
   filedAt?: string | null;
   content: string;
 }): Promise<{ documentId: number; chunkCount: number; embedded: boolean }> {
-  const [doc] = db
+  const [doc] = await db
     .insert(tables.documents)
     .values({
       companyId: opts.companyId ?? null,
@@ -61,23 +61,20 @@ export async function storeDocument(opts: {
       filedAt: opts.filedAt ?? null,
       content: opts.content,
     })
-    .returning()
-    .all();
+    .returning();
 
   const pieces = chunkText(opts.content);
   const embeddings = await tryEmbedMany(pieces);
 
   if (pieces.length > 0) {
-    db.insert(tables.chunks)
-      .values(
-        pieces.map((text, i) => ({
-          documentId: doc.id,
-          idx: i,
-          text,
-          embedding: embeddings[i] ? JSON.stringify(embeddings[i]) : null,
-        })),
-      )
-      .run();
+    await db.insert(tables.chunks).values(
+      pieces.map((text, i) => ({
+        documentId: doc.id,
+        idx: i,
+        text,
+        embedding: embeddings[i] ? JSON.stringify(embeddings[i]) : null,
+      })),
+    );
   }
 
   return { documentId: doc.id, chunkCount: pieces.length, embedded: embeddings[0] != null };
@@ -95,15 +92,16 @@ export type RetrievedChunk = {
   source: string | null;
 };
 
-function ftsQuery(query: string): string {
-  // sanitize into OR-joined terms so raw user text can't break FTS syntax
+function tsQuery(query: string): string {
+  // Sanitize to alphanumeric terms, OR-joined for recall. Safe for to_tsquery
+  // because every term is plain alphanumeric (no tsquery operators leak in).
   const terms = query
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
     .filter((t) => t.length > 2)
     .slice(0, 12);
-  return terms.map((t) => `"${t}"`).join(" OR ");
+  return terms.join(" | ");
 }
 
 export async function searchVault(
@@ -113,16 +111,18 @@ export async function searchVault(
   const limit = opts.limit ?? 8;
   const results = new Map<number, { score: number }>();
 
-  // 1) FTS keyword search (always available)
-  const q = ftsQuery(query);
-  if (q) {
-    const rows = sqliteRaw
-      .prepare(
-        `SELECT rowid, rank FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?`,
-      )
-      .all(q, limit * 3) as { rowid: number; rank: number }[];
+  // 1) Postgres full-text search over the generated chunks.tsv column.
+  const tq = tsQuery(query);
+  if (tq) {
+    const rows = (await db.execute(sql`
+      SELECT id, ts_rank(tsv, to_tsquery('english', ${tq})) AS rank
+      FROM chunks
+      WHERE tsv @@ to_tsquery('english', ${tq})
+      ORDER BY rank DESC
+      LIMIT ${limit * 3}
+    `)) as unknown as { id: number; rank: number }[];
     rows.forEach((r, i) => {
-      results.set(r.rowid, { score: 1 - i / (rows.length || 1) });
+      results.set(Number(r.id), { score: 1 - i / (rows.length || 1) });
     });
   }
 
@@ -131,12 +131,13 @@ export async function searchVault(
   if (model) {
     try {
       const { embedding: qVec } = await embed({ model, value: query });
-      const embedded = sqliteRaw
-        .prepare(`SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL`)
-        .all() as { id: number; embedding: string }[];
+      const embedded = await db
+        .select({ id: tables.chunks.id, embedding: tables.chunks.embedding })
+        .from(tables.chunks)
+        .where(isNotNull(tables.chunks.embedding));
       const scored = embedded
         .map((row) => {
-          const v = JSON.parse(row.embedding) as number[];
+          const v = JSON.parse(row.embedding as string) as number[];
           let dot = 0;
           for (let i = 0; i < v.length; i++) dot += v[i] * qVec[i];
           return { id: row.id, sim: dot }; // text-embedding-3 vectors are unit-normalized

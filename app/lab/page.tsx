@@ -1,7 +1,14 @@
 import { desc } from "drizzle-orm";
 import { db, tables } from "@/db";
 import { PageHeader, TickerLink } from "@/components/ui";
+import { ModelHealthPanel } from "@/components/model-health";
 import { AGENTS, ROUTING, getProviderStatus, overrideEnvVar, type Provider } from "@/lib/models";
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return `${n}`;
+}
 
 export const dynamic = "force-dynamic";
 
@@ -84,6 +91,8 @@ export default async function Lab() {
         </section>
 
         <section className="col-span-4 space-y-6">
+          <ModelHealthPanel />
+
           <div>
             <div className="label mb-3">Provider Keys</div>
             <div className="card divide-y divide-line">
@@ -112,27 +121,52 @@ export default async function Lab() {
           <div>
             <div className="label mb-3">Recent Runs by Model — last {runRows.length}</div>
             <div className="space-y-3">
-              {[...byModel.entries()].map(([model, runs]) => (
-                <div key={model} className="card">
-                  <div className="flex items-baseline justify-between px-4 py-2.5">
-                    <span className="fin text-[11px] tracking-[0.1em] text-platinum">{model}</span>
-                    <span className="fin text-[10px] text-parchment-faint">{runs.length} run(s)</span>
-                  </div>
-                  <div className="divide-y divide-line border-t border-line">
-                    {runs.slice(0, 6).map((r) => (
-                      <div key={r.id} className="flex items-baseline gap-2 px-4 py-2">
-                        <span className="fin text-[10px] tracking-[0.1em] text-parchment">
-                          {r.agent.replace(/_/g, " ").toUpperCase()}
-                        </span>
-                        <span className="fin ml-auto text-[9px] text-parchment-faint/70">
-                          {r.createdAt?.toISOString().slice(0, 16).replace("T", " ")}
-                        </span>
-                        {r.ticker && <TickerLink ticker={r.ticker} />}
+              {[...byModel.entries()].map(([model, runs]) => {
+                const tokens = runs.reduce((s, r) => s + (r.totalTokens ?? 0), 0);
+                const calls = runs.reduce((s, r) => s + (r.llmCalls ?? 1), 0);
+                const latencies = runs.map((r) => r.latencyMs).filter((x): x is number => x != null);
+                const avgLatency = latencies.length
+                  ? Math.round(latencies.reduce((s, x) => s + x, 0) / latencies.length)
+                  : null;
+                return (
+                  <div key={model} className="card">
+                    <div className="flex items-baseline justify-between px-4 py-2.5">
+                      <span className="fin text-[11px] tracking-[0.1em] text-platinum">{model}</span>
+                      <span className="fin text-[10px] text-parchment-faint">{runs.length} run(s)</span>
+                    </div>
+                    {tokens > 0 && (
+                      <div className="flex items-baseline gap-4 border-t border-line px-4 py-1.5">
+                        <span className="label !text-[8px]">Tokens</span>
+                        <span className="fin text-[10px] text-parchment-dim">{fmtTokens(tokens)}</span>
+                        <span className="label !text-[8px]">LLM calls</span>
+                        <span className="fin text-[10px] text-parchment-dim">{calls}</span>
+                        {avgLatency != null && (
+                          <>
+                            <span className="label ml-auto !text-[8px]">Avg latency</span>
+                            <span className="fin text-[10px] text-parchment-dim">{(avgLatency / 1000).toFixed(1)}s</span>
+                          </>
+                        )}
                       </div>
-                    ))}
+                    )}
+                    <div className="divide-y divide-line border-t border-line">
+                      {runs.slice(0, 6).map((r) => (
+                        <div key={r.id} className="flex items-baseline gap-2 px-4 py-2">
+                          <span className="fin text-[10px] tracking-[0.1em] text-parchment">
+                            {r.agent.replace(/_/g, " ").toUpperCase()}
+                          </span>
+                          {r.totalTokens != null && (
+                            <span className="fin text-[9px] text-parchment-faint/70">{fmtTokens(r.totalTokens)} tok</span>
+                          )}
+                          <span className="fin ml-auto text-[9px] text-parchment-faint/70">
+                            {r.createdAt?.toISOString().slice(0, 16).replace("T", " ")}
+                          </span>
+                          {r.ticker && <TickerLink ticker={r.ticker} />}
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               {byModel.size === 0 && (
                 <div className="card px-5 py-10 text-center text-sm text-parchment-faint">
                   No agent runs logged. Run an Athena investigation — each run records the model

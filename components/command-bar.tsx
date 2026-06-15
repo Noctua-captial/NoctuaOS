@@ -30,6 +30,25 @@ const NAV: Item[] = [
   { id: "nav-athena", group: "Navigate", title: "Athena", sub: "New investigation", href: "/new", hint: "G A" },
 ];
 
+// "G then <key>" quick-nav, matching the hints shown in the palette.
+const GOTO: Record<string, string> = {
+  p: "/",
+  d: "/dossiers",
+  v: "/vault",
+  i: "/ic",
+  t: "/talons",
+  w: "/war-room",
+  l: "/ledger",
+  m: "/lab",
+  a: "/new",
+};
+
+function isTypingTarget(el: Element | null): boolean {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el as HTMLElement).isContentEditable;
+}
+
 function score(text: string, q: string): number {
   const t = text.toLowerCase();
   const s = q.toLowerCase();
@@ -51,6 +70,8 @@ export function CommandBar() {
   const [data, setData] = useState<{ companies: Company[]; memos: Memo[] } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const gPendingRef = useRef(0);
 
   const openBar = useCallback(() => {
     setOpen(true);
@@ -72,8 +93,24 @@ export function CommandBar() {
           if (!o) openBar();
           return !o;
         });
-      } else if (e.key === "Escape") {
+        return;
+      }
+      if (e.key === "Escape") {
         setOpen(false);
+        return;
+      }
+      // "G then <key>" quick navigation — only when not typing and no modifiers.
+      if (e.metaKey || e.ctrlKey || e.altKey || isTypingTarget(document.activeElement)) return;
+      const key = e.key.toLowerCase();
+      if (key === "g") {
+        gPendingRef.current = Date.now();
+        return;
+      }
+      if (gPendingRef.current && Date.now() - gPendingRef.current < 1500 && GOTO[key]) {
+        gPendingRef.current = 0;
+        router.push(GOTO[key]);
+      } else {
+        gPendingRef.current = 0;
       }
     };
     window.addEventListener("keydown", onKey);
@@ -83,7 +120,25 @@ export function CommandBar() {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("noctua:command", onOpen);
     };
-  }, [openBar]);
+  }, [openBar, router]);
+
+  // Keep keyboard focus inside the dialog while it is open.
+  function trapFocus(e: React.KeyboardEvent) {
+    if (e.key !== "Tab") return;
+    const focusables = panelRef.current?.querySelectorAll<HTMLElement>(
+      'input, button, [tabindex]:not([tabindex="-1"])',
+    );
+    if (!focusables || focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
 
   useEffect(() => {
     if (open) setTimeout(() => inputRef.current?.focus(), 30);
@@ -249,8 +304,13 @@ export function CommandBar() {
       onClick={() => setOpen(false)}
     >
       <div
-        className="fade-up w-[620px] border border-line-strong bg-ink-raised shadow-2xl"
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+        className="fade-up w-[620px] max-w-[calc(100vw-1.5rem)] border border-line-strong bg-ink-raised shadow-2xl"
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={trapFocus}
       >
         <div className="flex items-center gap-3 border-b border-line px-5 py-4">
           <span className="serif text-xl text-parchment-faint">α</span>

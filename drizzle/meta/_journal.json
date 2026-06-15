@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1781531112064,
+      "tag": "0000_noctua_pg_init",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1781533487679,
+      "tag": "0001_kv_app_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781538058841,
+      "tag": "0002_vault_fts_and_indexes",
+      "breakpoints": true
+    }
+  ]
+}

@@ -4,10 +4,11 @@
 // Cluster-buy detector: ≥2 distinct insiders with P purchases inside any
 // 14-day window — the one insider signal with real literature behind it.
 import { tickerToCik } from "@/lib/edgar";
-import { FETCH_TIMEOUT_MS, upsertSignal } from "@/lib/signals/common";
+import { fetchSec } from "@/lib/net";
+import { upsertSignal } from "@/lib/signals/common";
 
 // Same UA convention as lib/edgar.ts — SEC requires a descriptive User-Agent.
-const UA = process.env.EDGAR_USER_AGENT ?? "NoctuaOS research internal@noctua.local";
+const UA = process.env.EDGAR_USER_AGENT ?? "NoctuaOS/0.1 (contact: set EDGAR_USER_AGENT)";
 const headers = { "User-Agent": UA, "Accept-Encoding": "gzip" };
 
 const WINDOW_DAYS = 120;
@@ -137,10 +138,7 @@ export async function fetchInsiderActivity(ticker: string): Promise<InsiderActiv
     const entry = await tickerToCik(t);
     if (!entry) throw new Error(`Ticker ${t} not found in EDGAR registry.`);
     const cik10 = String(entry.cik_str).padStart(10, "0");
-    const res = await fetch(`https://data.sec.gov/submissions/CIK${cik10}.json`, {
-      headers,
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    const res = await fetchSec(`https://data.sec.gov/submissions/CIK${cik10}.json`, headers);
     if (!res.ok) throw new Error(`EDGAR submissions fetch failed (${res.status}) for ${t}`);
     const data = await res.json();
     const recent = data.filings?.recent as SubmissionsRecent | undefined;
@@ -174,7 +172,7 @@ export async function fetchInsiderActivity(ticker: string): Promise<InsiderActiv
       const rawDoc = pick.primaryDoc.split("/").pop() ?? pick.primaryDoc;
       const url = `https://www.sec.gov/Archives/edgar/data/${cik}/${pick.accession.replace(/-/g, "")}/${rawDoc}`;
       try {
-        const res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+        const res = await fetchSec(url, headers);
         if (!res.ok) continue; // skip unfetchable forms; the rest still count
         parsed = parseForm4(await res.text(), pick.filedAt, url);
         form4Cache.set(pick.accession, parsed);
