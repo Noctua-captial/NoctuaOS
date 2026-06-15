@@ -64,13 +64,14 @@ export type TreeNode = {
 export async function runResearchTree(opts: {
   ticker: string;
   companyId: number | null;
+  investigationId: string;
   dossier: DossierResult;
   quant: NameQuant | null;
   vaultCtx: string;
   emit: Emit;
   saveTrace: (researcher: string, trace: Trace) => void;
 }): Promise<{ nodes: TreeNode[]; summary: string; calls: number; modelId: string; usage: RunUsage; latencyMs: number }> {
-  const { ticker, companyId, dossier, quant, vaultCtx, emit } = opts;
+  const { ticker, companyId, investigationId, dossier, quant, vaultCtx, emit } = opts;
   const investigatorM = modelFor("investigator");
   let calls = 0;
   let usage = emptyUsage();
@@ -117,6 +118,7 @@ Identify the 3-5 questions on which this thesis actually stands or falls. Not ba
       .values({
         companyId,
         ticker,
+        investigationId,
         parentId: item.parentId,
         depth: item.depth,
         question: item.question,
@@ -309,17 +311,18 @@ export type DebateVerdict = z.infer<typeof verdictSchema>;
 export async function runDebate(opts: {
   ticker: string;
   companyId: number | null;
+  investigationId: string;
   dossier: DossierResult;
   treeSummary: string;
   logicAudit: LogicAudit | null;
   quant: NameQuant | null;
   emit: Emit;
 }): Promise<{ debateId: number; verdict: DebateVerdict; runs: StageRun[] }> {
-  const { ticker, companyId, dossier, treeSummary, logicAudit, quant, emit } = opts;
+  const { ticker, companyId, investigationId, dossier, treeSummary, logicAudit, quant, emit } = opts;
 
   const [debate] = db
     .insert(tables.debates)
-    .values({ companyId, ticker, status: "running" })
+    .values({ companyId, ticker, investigationId, status: "running" })
     .returning()
     .all();
 
@@ -452,6 +455,7 @@ ${quantBlock(quant)}`;
     .values({
       companyId,
       ticker,
+      investigationId,
       parentId: null,
       depth: 1,
       question: `[CRUX] ${verdict.crux} — resolve via: ${verdict.resolvingEvidence}`,

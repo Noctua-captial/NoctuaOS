@@ -40,6 +40,9 @@ export const claims = sqliteTable("claims", {
   confidence: real("confidence").notNull().default(0.5),
   source: text("source"),
   sourceType: text("source_type"), // filing | transcript | pricing_data | analyst_note | competitor | news
+  // Investigation that produced this claim. NULL = added by a human analyst —
+  // re-running Athena replaces agent claims but preserves analyst claims.
+  investigationId: text("investigation_id"),
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
 
@@ -50,6 +53,7 @@ export const catalysts = sqliteTable("catalysts", {
   kind: text("kind"), // earnings | product | regulatory | contract | macro | index | guidance
   expectedDate: text("expected_date"), // ISO date or fuzzy ("Q3 2026")
   impact: text("impact"), // what it could change
+  investigationId: text("investigation_id"), // NULL = analyst-added; agent rows replaced on re-run
 });
 
 export const scores = sqliteTable("scores", {
@@ -58,6 +62,7 @@ export const scores = sqliteTable("scores", {
   total: integer("total").notNull(),
   components: text("components").notNull(), // JSON {thesisClarity, evidenceQuality, ...}
   rationale: text("rationale").notNull(),
+  investigationId: text("investigation_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
 
@@ -72,6 +77,7 @@ export const memos = sqliteTable("memos", {
   decidedBy: text("decided_by"), // human IC member who made the call
   decidedAt: integer("decided_at", { mode: "timestamp" }),
   content: text("content").notNull(), // JSON of all 14 memo sections
+  investigationId: text("investigation_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
 
@@ -104,6 +110,7 @@ export const agentRuns = sqliteTable("agent_runs", {
   model: text("model"),
   inputSummary: text("input_summary"),
   output: text("output").notNull(), // JSON report
+  investigationId: text("investigation_id"), // groups all artifacts from one Athena run
   // Telemetry — populated per run for cost/latency visibility in /lab.
   promptTokens: integer("prompt_tokens"),
   completionTokens: integer("completion_tokens"),
@@ -129,6 +136,7 @@ export const traces = sqliteTable("traces", {
   reasoningPattern: text("reasoning_pattern"),
   outcome: text("outcome"), // filled in later by postmortems / labeling
   label: text("label"), // human label: strong_signal | weak_signal | false_positive | ...
+  investigationId: text("investigation_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
 
@@ -209,6 +217,7 @@ export const researchQuestions = sqliteTable("research_questions", {
   answer: text("answer"),
   confidence: real("confidence"),
   agent: text("agent"),
+  investigationId: text("investigation_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
 
@@ -222,6 +231,7 @@ export const debates = sqliteTable("debates", {
   crux: text("crux"), // the single unresolved disagreement
   resolvingEvidence: text("resolving_evidence"),
   status: text("status").notNull().default("running"), // running | settled | aborted
+  investigationId: text("investigation_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
 

@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { and, eq, isNotNull } from "drizzle-orm";
 import { db, tables } from "@/db";
 import {
   runDossierAgent,
@@ -28,6 +29,36 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "Provide a valid ticker." }, { status: 400 });
   }
 
+  // Resolve every agent's model up front, BEFORE streaming starts, so a missing
+  // provider key returns a real non-200 (503) instead of a 200 stream that only
+  // later reveals the failure. Once the stream's headers are sent the status
+  // can no longer change, so all pre-flight failures must surface here.
+  let models: Record<
+    "dossier" | "accounting" | "industry" | "catalyst" | "valuation" | "strix" | "evidence_auditor" | "synthesis",
+    ReturnType<typeof modelFor>
+  >;
+  try {
+    models = {
+      dossier: modelFor("dossier"),
+      accounting: modelFor("accounting"),
+      industry: modelFor("industry"),
+      catalyst: modelFor("catalyst"),
+      valuation: modelFor("valuation"),
+      strix: modelFor("strix"),
+      evidence_auditor: modelFor("evidence_auditor"),
+      synthesis: modelFor("synthesis"),
+    };
+  } catch (err) {
+    return Response.json(
+      { error: err instanceof Error ? err.message : "No model provider configured." },
+      { status: 503 },
+    );
+  }
+
+  // One ID groups every artifact this run produces (agent runs, traces, tree
+  // questions, debate, claims, catalysts, score, memo) — enabling idempotent
+  // re-runs and compensating cleanup on failure.
+  const investigationId = randomUUID();
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -52,6 +83,7 @@ export async function POST(req: NextRequest) {
             model: modelId,
             inputSummary,
             output: JSON.stringify(output),
+            investigationId,
             promptTokens: meta?.usage.inputTokens ?? null,
             completionTokens: meta?.usage.outputTokens ?? null,
             totalTokens: meta?.usage.totalTokens ?? null,
@@ -67,6 +99,7 @@ export async function POST(req: NextRequest) {
             researcher,
             ticker,
             companyId: companyId ?? null,
+            investigationId,
             currentQuestion: trace.currentQuestion,
             actionTaken: trace.actionTaken,
             sourceType: "agent_report",
@@ -80,17 +113,16 @@ export async function POST(req: NextRequest) {
           .run();
       };
 
+      let persisted = false;
       try {
-        // Resolve every agent's model up front — throws the friendly
-        // no-key error before any work starts if no provider is configured.
-        const dossierM = modelFor("dossier");
-        const accountingM = modelFor("accounting");
-        const industryM = modelFor("industry");
-        const catalystM = modelFor("catalyst");
-        const valuationM = modelFor("valuation");
-        const strixM = modelFor("strix");
-        const auditorM = modelFor("evidence_auditor");
-        const synthesisM = modelFor("synthesis");
+        const dossierM = models.dossier;
+        const accountingM = models.accounting;
+        const industryM = models.industry;
+        const catalystM = models.catalyst;
+        const valuationM = models.valuation;
+        const strixM = models.strix;
+        const auditorM = models.evidence_auditor;
+        const synthesisM = models.synthesis;
 
         // ---- Vault grounding ----
         emit({ stage: "vault", message: `Pulling primary-source evidence for ${ticker} from the Vault…` });
@@ -148,6 +180,7 @@ export async function POST(req: NextRequest) {
         const tree = await runResearchTree({
           ticker,
           companyId: null, // linked to the company after upsert
+          investigationId,
           dossier,
           quant,
           vaultCtx,
@@ -211,6 +244,7 @@ export async function POST(req: NextRequest) {
         const { debateId, verdict, runs: debateRuns } = await runDebate({
           ticker,
           companyId: null, // linked after upsert
+          investigationId,
           dossier,
           treeSummary: tree.summary,
           logicAudit,
@@ -250,8 +284,13 @@ export async function POST(req: NextRequest) {
           : synthesis.memo.recommendation === "reject" ? "rejected"
           : "pipeline";
 
-        // Upsert company
-        const existing = await db.query.companies.findFirst({ where: eq(tables.companies.ticker, ticker) });
+        // Upsert company + commit all research memory atomically. Re-running an
+        // investigation replaces this run's prior agent claims/catalysts (analyst
+        // rows have no investigationId and are kept) and appends a new thesis,
+        // score, and memo version — never duplicating the agent set. If any write
+        // fails the whole commit rolls back.
+        const memoId = db.transaction(() => {
+        const existing = db.select().from(tables.companies).where(eq(tables.companies.ticker, ticker)).get();
         let companyId: number;
         if (existing) {
           companyId = existing.id;
@@ -307,7 +346,7 @@ export async function POST(req: NextRequest) {
         db.update(tables.traces).set({ companyId }).where(eq(tables.traces.ticker, ticker)).run();
 
         // Thesis version
-        const priorTheses = await db.select().from(tables.theses).where(eq(tables.theses.companyId, companyId));
+        const priorTheses = db.select().from(tables.theses).where(eq(tables.theses.companyId, companyId)).all();
         db.insert(tables.theses)
           .values({
             companyId,
@@ -319,6 +358,15 @@ export async function POST(req: NextRequest) {
             whatMustHappen: JSON.stringify(dossier.bullThesis.whatMustHappen),
             killCriteria: JSON.stringify(strix.killCriteria),
           })
+          .run();
+
+        // Idempotency: drop this run's predecessor agent claims/catalysts (rows
+        // carrying an investigationId) while preserving analyst-added rows (null).
+        db.delete(tables.claims)
+          .where(and(eq(tables.claims.companyId, companyId), isNotNull(tables.claims.investigationId)))
+          .run();
+        db.delete(tables.catalysts)
+          .where(and(eq(tables.catalysts.companyId, companyId), isNotNull(tables.catalysts.investigationId)))
           .run();
 
         // Claims with auditor adjustments applied
@@ -335,6 +383,7 @@ export async function POST(req: NextRequest) {
                 confidence: audit?.adjustedConfidence ?? c.confidence,
                 source: c.source,
                 sourceType: c.sourceType,
+                investigationId,
               };
             }),
           )
@@ -348,6 +397,7 @@ export async function POST(req: NextRequest) {
               kind: c.kind,
               expectedDate: c.expectedDate,
               impact: `${c.impact} (p≈${Math.round(c.probability * 100)}%)`,
+              investigationId,
             })),
           )
           .run();
@@ -369,10 +419,11 @@ export async function POST(req: NextRequest) {
               liquidityRiskFit: s.liquidityRiskFit,
             }),
             rationale: s.rationale,
+            investigationId,
           })
           .run();
 
-        const priorMemos = await db.select().from(tables.memos).where(eq(tables.memos.companyId, companyId));
+        const priorMemos = db.select().from(tables.memos).where(eq(tables.memos.companyId, companyId)).all();
         const [memo] = db
           .insert(tables.memos)
           .values({
@@ -382,6 +433,7 @@ export async function POST(req: NextRequest) {
             proposedAction: synthesis.memo.proposedAction,
             proposedSize: synthesis.memo.proposedSize,
             recommendation: synthesis.memo.recommendation,
+            investigationId,
             content: JSON.stringify({
               oneSentenceThesis: dossier.bullThesis.oneLiner,
               variantPerception: dossier.bullThesis.variantPerception,
@@ -430,17 +482,49 @@ export async function POST(req: NextRequest) {
         saveRun("synthesis", synthesis, "IC synthesis", synthesisM.modelId, companyId, synthesisMeta);
         db.update(tables.debates).set({ memoId: memo.id }).where(eq(tables.debates.id, debateId)).run();
 
+        return memo.id;
+        });
+        persisted = true;
+
         emit({
           stage: "done",
           message: `Symposium complete. Debate verdict: ${verdict.verdict} (${(verdict.conviction * 100).toFixed(0)}%). Noctua Score: ${total}. Recommendation: ${synthesis.memo.recommendation.replace("_", " ")}. Tree, debate transcript, and traces committed to the Alpha Ledger.`,
           ticker,
-          memoId: memo.id,
+          memoId,
           debateId,
           score: total,
         });
       } catch (err) {
+        // A failed run must not leave orphaned partial artifacts. Every artifact
+        // this run wrote (agent runs, traces, tree questions, debate + turns)
+        // carries investigationId; the committed research memory is transactional,
+        // so we only roll back the incremental artifacts when persistence did not
+        // complete.
+        if (!persisted) {
+          try {
+            db.transaction(() => {
+              const orphanDebates = db
+                .select({ id: tables.debates.id })
+                .from(tables.debates)
+                .where(eq(tables.debates.investigationId, investigationId))
+                .all();
+              for (const d of orphanDebates) {
+                db.delete(tables.debateTurns).where(eq(tables.debateTurns.debateId, d.id)).run();
+              }
+              db.delete(tables.debates).where(eq(tables.debates.investigationId, investigationId)).run();
+              db.delete(tables.researchQuestions)
+                .where(eq(tables.researchQuestions.investigationId, investigationId))
+                .run();
+              db.delete(tables.traces).where(eq(tables.traces.investigationId, investigationId)).run();
+              db.delete(tables.agentRuns).where(eq(tables.agentRuns.investigationId, investigationId)).run();
+            });
+          } catch {
+            // best-effort cleanup; the error below is what the client sees
+          }
+        }
         emit({
           stage: "error",
+          ok: false,
           message: err instanceof Error ? err.message : "Unknown failure in the Athena pipeline.",
         });
       } finally {
