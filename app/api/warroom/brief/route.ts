@@ -1,4 +1,3 @@
-import { generateObject } from "ai";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db, tables } from "@/db";
@@ -6,6 +5,7 @@ import { computeRegime, checkMandate, type CouncilBrief } from "@/lib/warroom";
 import { computeBookQuant, computeNameQuant, MANDATE } from "@/lib/quant";
 import { getQuotes } from "@/lib/market";
 import { modelFor } from "@/lib/models";
+import { generateObjectRetry } from "@/lib/ai";
 import { CONSTITUTION } from "@/lib/athena";
 
 export const maxDuration = 300;
@@ -62,8 +62,9 @@ export async function POST() {
     // Three short seat views merged by the moderator in a single structured call
     // (PM + Risk + Strix perspectives are demanded inside the prompt to keep cost at one call).
     const m = modelFor("synthesis");
-    const { object: brief } = await generateObject({
+    const { object: brief } = await generateObjectRetry({
       model: m.model,
+      modelId: m.modelId,
       schema: briefSchema,
       system: `${CONSTITUTION}\n\nYou are the War Room council: a PM (owns the book), a Risk officer (owns the mandate), and Strix (owns the downside) deliberating the daily navigation brief. The PM proposes, Risk constrains, Strix attacks. Output the merged brief. Hard rules: never propose breaching the mandate; a "broken" thesis cannot be "add"; respect the regime read.`,
       prompt: `REGIME (keyless math, ground truth):
@@ -81,14 +82,12 @@ ${JSON.stringify(positionState, null, 2)}
 Produce today's navigation brief: a stance per position (hold/trim/add/exit with size delta), the cash stance, and what would change the council's mind.`,
     });
 
-    const [row] = db
+    const [row] = await db
       .insert(tables.councilBriefs)
       .values({ regime: regime.read, content: JSON.stringify(brief satisfies CouncilBrief) })
-      .returning()
-      .all();
+      .returning();
 
-    db.insert(tables.traces)
-      .values({
+    await db.insert(tables.traces).values({
         researcher: "WarRoomCouncil",
         ticker: null,
         currentQuestion: "How should the book be navigated today?",
@@ -100,8 +99,7 @@ Produce today's navigation brief: a stance per position (hold/trim/add/exit with
         confidenceChange: 0,
         nextAction: brief.cashStance.slice(0, 160),
         reasoningPattern: "The book is navigated daily: regime read, mandate check, per-position stance, cash decision.",
-      })
-      .run();
+    });
 
     return Response.json({ briefId: row.id, regime, brief, model: m.modelId });
   } catch (err) {

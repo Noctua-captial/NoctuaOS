@@ -41,11 +41,16 @@ function wedge(cx: number, cy: number, r0: number, r1: number, a0: number, a1: n
   const [x2, y2] = polar(cx, cy, r0, a1);
   const [x3, y3] = polar(cx, cy, r0, a0);
   const large = a1 - a0 > 180 ? 1 : 0;
+  // Quantize every emitted number to 2 decimals (sub-pixel here). Math.cos/sin
+  // are spec-allowed to differ by an ULP across engines (Node SSR vs browser),
+  // and the full-precision floats would otherwise produce mismatched SVG `d`
+  // strings → a React hydration mismatch.
+  const f = (n: number) => n.toFixed(2);
   return [
-    `M ${x0} ${y0}`,
-    `A ${r1} ${r1} 0 ${large} 1 ${x1} ${y1}`,
-    `L ${x2} ${y2}`,
-    `A ${r0} ${r0} 0 ${large} 0 ${x3} ${y3}`,
+    `M ${f(x0)} ${f(y0)}`,
+    `A ${f(r1)} ${f(r1)} 0 ${large} 1 ${f(x1)} ${f(y1)}`,
+    `L ${f(x2)} ${f(y2)}`,
+    `A ${f(r0)} ${f(r0)} 0 ${large} 0 ${f(x3)} ${f(y3)}`,
     "Z",
   ].join(" ");
 }

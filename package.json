@@ -6,7 +6,19 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:math": "vitest run lib/mathlab lib/__tests__",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "db:push": "drizzle-kit push",
+    "db:seed": "tsx db/seed.ts",
+    "smoke:mathlab": "tsx scripts/smoke-mathlab.ts",
+    "smoke:quant": "tsx scripts/smoke-quant.ts",
+    "smoke:signals": "tsx scripts/smoke-signals.ts",
+    "smoke:market": "tsx scripts/smoke-market.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.83",
@@ -14,24 +26,26 @@
     "@ai-sdk/react": "^3.0.204",
     "@ai-sdk/xai": "^3.0.94",
     "ai": "^6.0.202",
-    "better-sqlite3": "^12.10.0",
     "drizzle-orm": "^0.45.2",
     "next": "16.2.9",
+    "postgres": "^3.4.9",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.2",
     "@tailwindcss/postcss": "^4",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
+    "prettier": "^3.8.4",
     "tailwindcss": "^4",
     "tsx": "^4.22.4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.8"
   }
 }
