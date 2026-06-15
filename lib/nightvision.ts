@@ -89,7 +89,7 @@ async function raiseAlert(opts: {
     );
   if (existing.some((a) => a.message.startsWith(prefix))) return false;
 
-  db.insert(tables.alerts)
+  await db.insert(tables.alerts)
     .values({
       companyId: opts.companyId,
       ticker: opts.ticker,
@@ -97,8 +97,7 @@ async function raiseAlert(opts: {
       kind: opts.kind,
       message: opts.message,
       suggestedAction: opts.suggestedAction,
-    })
-    .run();
+    });
   return true;
 }
 
