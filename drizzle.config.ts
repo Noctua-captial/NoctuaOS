@@ -1,9 +1,8 @@
 import { defineConfig } from "drizzle-kit";
 
 export default defineConfig({
-  dialect: "sqlite",
+  dialect: "postgresql",
   schema: "./db/schema.ts",
   out: "./drizzle",
-  dbCredentials: { url: "./noctua.db" },
-  tablesFilter: ["!chunks_fts*"],
+  dbCredentials: { url: process.env.DATABASE_URL ?? "" },
 });

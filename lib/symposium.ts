@@ -69,7 +69,7 @@ export async function runResearchTree(opts: {
   quant: NameQuant | null;
   vaultCtx: string;
   emit: Emit;
-  saveTrace: (researcher: string, trace: Trace) => void;
+  saveTrace: (researcher: string, trace: Trace) => void | Promise<void>;
 }): Promise<{ nodes: TreeNode[]; summary: string; calls: number; modelId: string; usage: RunUsage; latencyMs: number }> {
   const { ticker, companyId, investigationId, dossier, quant, vaultCtx, emit } = opts;
   const investigatorM = modelFor("investigator");
@@ -113,7 +113,7 @@ Identify the 3-5 questions on which this thesis actually stands or falls. Not ba
   while (queue.length > 0 && calls - 1 < TREE_BUDGET) {
     const item = queue.shift()!;
 
-    const [row] = db
+    const [row] = await db
       .insert(tables.researchQuestions)
       .values({
         companyId,
@@ -125,8 +125,7 @@ Identify the 3-5 questions on which this thesis actually stands or falls. Not ba
         status: "pending",
         agent: item.specialty,
       })
-      .returning()
-      .all();
+      .returning();
 
     // Question-specific vault retrieval sharpens grounding beyond the global context
     const localCtx = await vaultContext(ticker, [item.question], 3).catch(() => "");
@@ -153,14 +152,14 @@ Answer it as directly as the evidence allows. Be honest about confidence. Spawn 
     const willSpawn =
       result.confidence < SPAWN_THRESHOLD && result.childQuestions.length > 0 && item.depth < MAX_DEPTH;
 
-    db.update(tables.researchQuestions)
+    await db
+      .update(tables.researchQuestions)
       .set({
         status: willSpawn ? "spawned" : "answered",
         answer: result.answer,
         confidence: result.confidence,
       })
-      .where(eq(tables.researchQuestions.id, row.id))
-      .run();
+      .where(eq(tables.researchQuestions.id, row.id));
 
     nodes.push({
       id: row.id,
@@ -173,7 +172,7 @@ Answer it as directly as the evidence allows. Be honest about confidence. Spawn 
       implication: result.implication,
     });
 
-    opts.saveTrace(`Investigator(${item.specialty})`, {
+    await opts.saveTrace(`Investigator(${item.specialty})`, {
       currentQuestion: item.question,
       actionTaken: `Depth-${item.depth} tree investigation, grounded in Vault + quant data`,
       informationSeen: result.keyEvidence[0] ?? result.answer.slice(0, 140),
@@ -320,11 +319,10 @@ export async function runDebate(opts: {
 }): Promise<{ debateId: number; verdict: DebateVerdict; runs: StageRun[] }> {
   const { ticker, companyId, investigationId, dossier, treeSummary, logicAudit, quant, emit } = opts;
 
-  const [debate] = db
+  const [debate] = await db
     .insert(tables.debates)
     .values({ companyId, ticker, investigationId, status: "running" })
-    .returning()
-    .all();
+    .returning();
 
   // Accumulate token/latency telemetry per model — the debate spans 4 models,
   // so attributing cost to a single one would be misleading.
@@ -341,10 +339,10 @@ export async function runDebate(opts: {
   };
 
   let turnIdx = 0;
-  const saveTurn = (round: string, seat: string, content: string, modelId: string) => {
-    db.insert(tables.debateTurns)
-      .values({ debateId: debate.id, round, seat, content, modelId, idx: turnIdx++ })
-      .run();
+  const saveTurn = async (round: string, seat: string, content: string, modelId: string) => {
+    await db
+      .insert(tables.debateTurns)
+      .values({ debateId: debate.id, round, seat, content, modelId, idx: turnIdx++ });
   };
 
   const dossierBlock = `TICKER: ${ticker}
@@ -372,7 +370,7 @@ ${quantBlock(quant)}`;
     });
     accrue(m.modelId, meta.usage, meta.latencyMs);
     transcript.push({ round, seat, argument: object.argument });
-    saveTurn(round, seat, JSON.stringify(object), m.modelId);
+    await saveTurn(round, seat, JSON.stringify(object), m.modelId);
     return object;
   }
 
@@ -404,7 +402,7 @@ ${quantBlock(quant)}`;
     prompt: `${dossierBlock}\n\nDEBATE SO FAR:\n${transcriptBlock()}\n\nIdentify the crux: the single question whose answer decides this debate. Pose it to all three seats.`,
   });
   accrue(moderatorM.modelId, cruxQ.meta.usage, cruxQ.meta.latencyMs);
-  saveTurn("cross", "moderator", JSON.stringify(cruxQ.object), moderatorM.modelId);
+  await saveTurn("cross", "moderator", JSON.stringify(cruxQ.object), moderatorM.modelId);
   emit({ stage: "debate", message: `Cross-examination. Athena poses the crux: "${cruxQ.object.cruxQuestion.slice(0, 140)}"` });
 
   await Promise.all(
@@ -437,9 +435,10 @@ ${quantBlock(quant)}`;
     prompt: `${dossierBlock}\n\nFULL DEBATE TRANSCRIPT:\n${transcriptBlock()}\n\nDeliver the verdict: pursue / watchlist / reject, your conviction, how the debate resolved, the remaining crux, and the specific obtainable evidence that would resolve it.`,
   });
   accrue(moderatorM.modelId, verdictMeta.usage, verdictMeta.latencyMs);
-  saveTurn("verdict", "moderator", JSON.stringify(verdict), moderatorM.modelId);
+  await saveTurn("verdict", "moderator", JSON.stringify(verdict), moderatorM.modelId);
 
-  db.update(tables.debates)
+  await db
+    .update(tables.debates)
     .set({
       verdict: verdict.verdict,
       conviction: verdict.conviction,
@@ -447,22 +446,19 @@ ${quantBlock(quant)}`;
       resolvingEvidence: verdict.resolvingEvidence,
       status: "done",
     })
-    .where(eq(tables.debates.id, debate.id))
-    .run();
+    .where(eq(tables.debates.id, debate.id));
 
   // The crux's resolving evidence becomes a pending research question
-  db.insert(tables.researchQuestions)
-    .values({
-      companyId,
-      ticker,
-      investigationId,
-      parentId: null,
-      depth: 1,
-      question: `[CRUX] ${verdict.crux} — resolve via: ${verdict.resolvingEvidence}`,
-      status: "pending",
-      agent: "general",
-    })
-    .run();
+  await db.insert(tables.researchQuestions).values({
+    companyId,
+    ticker,
+    investigationId,
+    parentId: null,
+    depth: 1,
+    question: `[CRUX] ${verdict.crux} — resolve via: ${verdict.resolvingEvidence}`,
+    status: "pending",
+    agent: "general",
+  });
 
   emit({
     stage: "debate",

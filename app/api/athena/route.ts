@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
       const emit = (event: Record<string, unknown>) =>
         controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
 
-      const saveRun = (
+      const saveRun = async (
         agent: string,
         output: unknown,
         inputSummary: string,
@@ -75,42 +75,38 @@ export async function POST(req: NextRequest) {
         meta?: { usage: RunMeta["usage"]; latencyMs: number },
         calls = 1,
       ) => {
-        db.insert(tables.agentRuns)
-          .values({
-            companyId: companyId ?? null,
-            ticker,
-            agent,
-            model: modelId,
-            inputSummary,
-            output: JSON.stringify(output),
-            investigationId,
-            promptTokens: meta?.usage.inputTokens ?? null,
-            completionTokens: meta?.usage.outputTokens ?? null,
-            totalTokens: meta?.usage.totalTokens ?? null,
-            latencyMs: meta?.latencyMs ?? null,
-            llmCalls: calls,
-          })
-          .run();
+        await db.insert(tables.agentRuns).values({
+          companyId: companyId ?? null,
+          ticker,
+          agent,
+          model: modelId,
+          inputSummary,
+          output: JSON.stringify(output),
+          investigationId,
+          promptTokens: meta?.usage.inputTokens ?? null,
+          completionTokens: meta?.usage.outputTokens ?? null,
+          totalTokens: meta?.usage.totalTokens ?? null,
+          latencyMs: meta?.latencyMs ?? null,
+          llmCalls: calls,
+        });
       };
 
-      const saveTrace = (researcher: string, trace: Trace, companyId?: number) => {
-        db.insert(tables.traces)
-          .values({
-            researcher,
-            ticker,
-            companyId: companyId ?? null,
-            investigationId,
-            currentQuestion: trace.currentQuestion,
-            actionTaken: trace.actionTaken,
-            sourceType: "agent_report",
-            informationSeen: trace.informationSeen,
-            interpretation: trace.interpretation,
-            signalCategory: trace.signalCategory,
-            confidenceChange: trace.confidenceChange,
-            nextAction: trace.nextAction,
-            reasoningPattern: trace.reasoningPattern,
-          })
-          .run();
+      const saveTrace = async (researcher: string, trace: Trace, companyId?: number) => {
+        await db.insert(tables.traces).values({
+          researcher,
+          ticker,
+          companyId: companyId ?? null,
+          investigationId,
+          currentQuestion: trace.currentQuestion,
+          actionTaken: trace.actionTaken,
+          sourceType: "agent_report",
+          informationSeen: trace.informationSeen,
+          interpretation: trace.interpretation,
+          signalCategory: trace.signalCategory,
+          confidenceChange: trace.confidenceChange,
+          nextAction: trace.nextAction,
+          reasoningPattern: trace.reasoningPattern,
+        });
       };
 
       let persisted = false;
@@ -141,7 +137,7 @@ export async function POST(req: NextRequest) {
         // ---- Stage 1: Dossier + Thesis ----
         emit({ stage: "dossier", message: `Dossier Agent and Thesis Agent assigned to ${ticker}.` });
         const { object: dossier, meta: dossierMeta } = await runDossierAgent(dossierM.model, ticker, vaultCtx, notes);
-        saveRun("dossier", dossier, `Investigation opened${notes ? ` — ${notes.slice(0, 80)}` : ""}`, dossierM.modelId, undefined, dossierMeta);
+        await saveRun("dossier", dossier, `Investigation opened${notes ? ` — ${notes.slice(0, 80)}` : ""}`, dossierM.modelId, undefined, dossierMeta);
         emit({ stage: "dossier", message: `Bull case formed: “${dossier.bullThesis.oneLiner}”` });
 
         // ---- Stage 1b: Quant snapshot (keyless ground truth) ----
@@ -166,10 +162,10 @@ export async function POST(req: NextRequest) {
         const industry = industryRun.object;
         const catalyst = catalystRun.object;
         const valuation = valuationRun.object;
-        saveRun("accounting", accounting, "Financial quality review", accountingM.modelId, undefined, accountingRun.meta);
-        saveRun("industry", industry, "Technical & competitive reality check", industryM.modelId, undefined, industryRun.meta);
-        saveRun("catalyst", catalyst, "Re-rating event map", catalystM.modelId, undefined, catalystRun.meta);
-        saveRun("valuation", valuation, "Bear/base/bull cases", valuationM.modelId, undefined, valuationRun.meta);
+        await saveRun("accounting", accounting, "Financial quality review", accountingM.modelId, undefined, accountingRun.meta);
+        await saveRun("industry", industry, "Technical & competitive reality check", industryM.modelId, undefined, industryRun.meta);
+        await saveRun("catalyst", catalyst, "Re-rating event map", catalystM.modelId, undefined, catalystRun.meta);
+        await saveRun("valuation", valuation, "Bear/base/bull cases", valuationM.modelId, undefined, valuationRun.meta);
         emit({
           stage: "bench",
           message: `Bench reported. Accounting: ${accounting.redFlags.length} red flag(s). Industry: AI exposure ${industry.aiExposureReal ? "real" : "NOT structurally real"}. Catalysts mapped: ${catalyst.catalysts.length}.`,
@@ -191,7 +187,7 @@ export async function POST(req: NextRequest) {
           stage: "tree",
           message: `Research tree complete: ${tree.nodes.length} questions answered across ${Math.max(...tree.nodes.map((n) => n.depth), 1)} levels (${tree.calls} model calls).`,
         });
-        saveRun(
+        await saveRun(
           "research_tree",
           { summary: tree.summary, nodeCount: tree.nodes.length },
           `Recursive research tree — ${tree.nodes.length} questions`,
@@ -209,7 +205,7 @@ export async function POST(req: NextRequest) {
           treeSummary: tree.summary,
           quant,
         });
-        saveRun("logic", logicAudit, "Premise-by-premise logic and science audit", logicModelId, undefined, { usage: logicUsage, latencyMs: logicLatency });
+        await saveRun("logic", logicAudit, "Premise-by-premise logic and science audit", logicModelId, undefined, { usage: logicUsage, latencyMs: logicLatency });
         emit({
           stage: "logic",
           message: `Logic verdict: ${logicAudit.verdict.toUpperCase()}. ${logicAudit.nonSequiturs.length} non-sequitur(s). Weakest premise: ${logicAudit.weakestPremise.slice(0, 120)}`,
@@ -218,7 +214,7 @@ export async function POST(req: NextRequest) {
         // ---- Stage 3: Strix ----
         emit({ stage: "strix", message: "Releasing Strix to attack the thesis and the bench's findings." });
         const { object: strix, meta: strixMeta } = await runStrix(strixM.model, ticker, dossier, { accounting, industry, catalyst, valuation }, vaultCtx);
-        saveRun("strix", strix, "Adversarial review of full bench", strixM.modelId, undefined, strixMeta);
+        await saveRun("strix", strix, "Adversarial review of full bench", strixM.modelId, undefined, strixMeta);
         emit({ stage: "strix", message: `Dissent recorded: “${strix.strongestDissent.slice(0, 160)}…”` });
 
         // ---- Stage 4: Evidence Auditor ----
@@ -235,7 +231,7 @@ export async function POST(req: NextRequest) {
           allClaims.map((c) => ({ text: c.text, kind: c.kind, confidence: c.confidence, source: c.source })),
           vaultCtx,
         );
-        saveRun("evidence_auditor", auditor, `Audited ${allClaims.length} claims`, auditorM.modelId, undefined, auditorMeta);
+        await saveRun("evidence_auditor", auditor, `Audited ${allClaims.length} claims`, auditorM.modelId, undefined, auditorMeta);
         const flagged = auditor.audits.filter((a) => a.verdict === "unsupported" || a.verdict === "contradicted").length;
         emit({ stage: "audit", message: `Audit complete: ${flagged} of ${auditor.audits.length} claims unsupported or contradicted. Weakest link: ${auditor.weakestLink.slice(0, 120)}` });
 
@@ -253,7 +249,7 @@ export async function POST(req: NextRequest) {
         });
         // One telemetry row per model that argued in the chamber (4 models, ~14 calls).
         for (const r of debateRuns) {
-          saveRun("debate", { seat: r.modelId }, "Debate Chamber turns", r.modelId, undefined, { usage: r.usage, latencyMs: r.latencyMs }, r.calls);
+          await saveRun("debate", { seat: r.modelId }, "Debate Chamber turns", r.modelId, undefined, { usage: r.usage, latencyMs: r.latencyMs }, r.calls);
         }
 
         // ---- Stage 6: Synthesis ----
@@ -284,71 +280,64 @@ export async function POST(req: NextRequest) {
           : synthesis.memo.recommendation === "reject" ? "rejected"
           : "pipeline";
 
-        // Upsert company + commit all research memory atomically. Re-running an
-        // investigation replaces this run's prior agent claims/catalysts (analyst
-        // rows have no investigationId and are kept) and appends a new thesis,
-        // score, and memo version — never duplicating the agent set. If any write
-        // fails the whole commit rolls back.
-        const memoId = db.transaction(() => {
-        const existing = db.select().from(tables.companies).where(eq(tables.companies.ticker, ticker)).get();
-        let companyId: number;
-        if (existing) {
-          companyId = existing.id;
-          db.update(tables.companies)
-            .set({
-              name: dossier.name,
-              sector: dossier.sector,
-              marketCap: dossier.marketCapEstimate,
-              liquidity: dossier.liquidityNote,
-              businessSummary: dossier.businessSummary,
-              convictionScore: total,
-              updatedAt: new Date(),
-            })
-            .where(eq(tables.companies.id, companyId))
-            .run();
-        } else {
-          const [created] = db
-            .insert(tables.companies)
-            .values({
-              ticker,
-              name: dossier.name,
-              sector: dossier.sector,
-              marketCap: dossier.marketCapEstimate,
-              liquidity: dossier.liquidityNote,
-              status: statusFromRec,
-              thesisStatus: "stable",
-              convictionScore: total,
-              ownerAnalyst: "Athena (draft)",
-              businessSummary: dossier.businessSummary,
-              rejectionReason: synthesis.memo.recommendation === "reject" ? synthesis.memo.finalRecommendation : null,
-            })
-            .returning()
-            .all();
-          companyId = created.id;
-        }
+        const auditByText = new Map(auditor.audits.map((a) => [a.claim.toLowerCase().slice(0, 60), a]));
 
-        // Link agent runs, traces, and orphan documents to the company
-        db.update(tables.agentRuns).set({ companyId }).where(eq(tables.agentRuns.ticker, ticker)).run();
-        db.update(tables.documents).set({ companyId }).where(eq(tables.documents.ticker, ticker)).run();
-        db.update(tables.researchQuestions).set({ companyId }).where(eq(tables.researchQuestions.ticker, ticker)).run();
-        db.update(tables.debates).set({ companyId }).where(eq(tables.debates.ticker, ticker)).run();
-        db.update(tables.quantSnapshots).set({ companyId }).where(eq(tables.quantSnapshots.ticker, ticker)).run();
+        // Upsert company + commit all research memory atomically (one Postgres
+        // transaction). Re-running an investigation replaces this run's prior
+        // agent claims/catalysts (analyst rows have no investigationId and are
+        // kept) and appends a new thesis, score, and memo version. If any write
+        // fails the whole commit rolls back. NOTE: inside a pooled Postgres
+        // transaction every query must use `tx`, not `db`.
+        const { companyId, memoId } = await db.transaction(async (tx) => {
+          const existing = (
+            await tx.select().from(tables.companies).where(eq(tables.companies.ticker, ticker)).limit(1)
+          )[0];
+          let companyId: number;
+          if (existing) {
+            companyId = existing.id;
+            await tx
+              .update(tables.companies)
+              .set({
+                name: dossier.name,
+                sector: dossier.sector,
+                marketCap: dossier.marketCapEstimate,
+                liquidity: dossier.liquidityNote,
+                businessSummary: dossier.businessSummary,
+                convictionScore: total,
+                updatedAt: new Date(),
+              })
+              .where(eq(tables.companies.id, companyId));
+          } else {
+            const [created] = await tx
+              .insert(tables.companies)
+              .values({
+                ticker,
+                name: dossier.name,
+                sector: dossier.sector,
+                marketCap: dossier.marketCapEstimate,
+                liquidity: dossier.liquidityNote,
+                status: statusFromRec,
+                thesisStatus: "stable",
+                convictionScore: total,
+                ownerAnalyst: "Athena (draft)",
+                businessSummary: dossier.businessSummary,
+                rejectionReason: synthesis.memo.recommendation === "reject" ? synthesis.memo.finalRecommendation : null,
+              })
+              .returning();
+            companyId = created.id;
+          }
 
-        // Traces from every agent
-        saveTrace("DossierAgent", dossier.trace, companyId);
-        saveTrace("AccountingAgent", accounting.trace, companyId);
-        saveTrace("IndustryAgent", industry.trace, companyId);
-        saveTrace("CatalystAgent", catalyst.trace, companyId);
-        saveTrace("ValuationAgent", valuation.trace, companyId);
-        saveTrace("Strix", strix.trace, companyId);
-        saveTrace("EvidenceAuditor", auditor.trace, companyId);
-        saveTrace("Athena", synthesis.trace, companyId);
-        db.update(tables.traces).set({ companyId }).where(eq(tables.traces.ticker, ticker)).run();
+          // Link this run's pipeline-written rows (and orphan documents) to the company.
+          await tx.update(tables.agentRuns).set({ companyId }).where(eq(tables.agentRuns.ticker, ticker));
+          await tx.update(tables.documents).set({ companyId }).where(eq(tables.documents.ticker, ticker));
+          await tx.update(tables.researchQuestions).set({ companyId }).where(eq(tables.researchQuestions.ticker, ticker));
+          await tx.update(tables.debates).set({ companyId }).where(eq(tables.debates.ticker, ticker));
+          await tx.update(tables.quantSnapshots).set({ companyId }).where(eq(tables.quantSnapshots.ticker, ticker));
+          await tx.update(tables.traces).set({ companyId }).where(eq(tables.traces.ticker, ticker));
 
-        // Thesis version
-        const priorTheses = db.select().from(tables.theses).where(eq(tables.theses.companyId, companyId)).all();
-        db.insert(tables.theses)
-          .values({
+          // Thesis version
+          const priorTheses = await tx.select().from(tables.theses).where(eq(tables.theses.companyId, companyId));
+          await tx.insert(tables.theses).values({
             companyId,
             version: priorTheses.length + 1,
             oneLiner: dossier.bullThesis.oneLiner,
@@ -357,22 +346,19 @@ export async function POST(req: NextRequest) {
             whyNow: dossier.bullThesis.whyNow,
             whatMustHappen: JSON.stringify(dossier.bullThesis.whatMustHappen),
             killCriteria: JSON.stringify(strix.killCriteria),
-          })
-          .run();
+          });
 
-        // Idempotency: drop this run's predecessor agent claims/catalysts (rows
-        // carrying an investigationId) while preserving analyst-added rows (null).
-        db.delete(tables.claims)
-          .where(and(eq(tables.claims.companyId, companyId), isNotNull(tables.claims.investigationId)))
-          .run();
-        db.delete(tables.catalysts)
-          .where(and(eq(tables.catalysts.companyId, companyId), isNotNull(tables.catalysts.investigationId)))
-          .run();
+          // Idempotency: drop this run's predecessor agent claims/catalysts (rows
+          // carrying an investigationId) while preserving analyst-added rows (null).
+          await tx
+            .delete(tables.claims)
+            .where(and(eq(tables.claims.companyId, companyId), isNotNull(tables.claims.investigationId)));
+          await tx
+            .delete(tables.catalysts)
+            .where(and(eq(tables.catalysts.companyId, companyId), isNotNull(tables.catalysts.investigationId)));
 
-        // Claims with auditor adjustments applied
-        const auditByText = new Map(auditor.audits.map((a) => [a.claim.toLowerCase().slice(0, 60), a]));
-        db.insert(tables.claims)
-          .values(
+          // Claims with auditor adjustments applied
+          await tx.insert(tables.claims).values(
             allClaims.map((c) => {
               const audit = auditByText.get(c.text.toLowerCase().slice(0, 60));
               return {
@@ -386,11 +372,9 @@ export async function POST(req: NextRequest) {
                 investigationId,
               };
             }),
-          )
-          .run();
+          );
 
-        db.insert(tables.catalysts)
-          .values(
+          await tx.insert(tables.catalysts).values(
             catalyst.catalysts.map((c) => ({
               companyId,
               title: c.title,
@@ -399,11 +383,9 @@ export async function POST(req: NextRequest) {
               impact: `${c.impact} (p≈${Math.round(c.probability * 100)}%)`,
               investigationId,
             })),
-          )
-          .run();
+          );
 
-        db.insert(tables.scores)
-          .values({
+          await tx.insert(tables.scores).values({
             companyId,
             total,
             components: JSON.stringify({
@@ -420,71 +402,80 @@ export async function POST(req: NextRequest) {
             }),
             rationale: s.rationale,
             investigationId,
-          })
-          .run();
+          });
 
-        const priorMemos = db.select().from(tables.memos).where(eq(tables.memos.companyId, companyId)).all();
-        const [memo] = db
-          .insert(tables.memos)
-          .values({
-            companyId,
-            version: priorMemos.length + 1,
-            analyst: "Athena (draft)",
-            proposedAction: synthesis.memo.proposedAction,
-            proposedSize: synthesis.memo.proposedSize,
-            recommendation: synthesis.memo.recommendation,
-            investigationId,
-            content: JSON.stringify({
-              oneSentenceThesis: dossier.bullThesis.oneLiner,
-              variantPerception: dossier.bullThesis.variantPerception,
-              whyNow: dossier.bullThesis.whyNow,
-              businessQuality: synthesis.memo.businessQuality,
-              industryContext: synthesis.memo.industryContext,
-              evidenceTable: allClaims.slice(0, 10).map((c) => {
-                const audit = auditByText.get(c.text.toLowerCase().slice(0, 60));
-                return {
-                  claim: c.text,
-                  evidence: audit ? audit.verdict.replace("_", " ") : c.kind.replace("_", " "),
-                  source: c.source,
-                  confidence: `${Math.round((audit?.adjustedConfidence ?? c.confidence) * 100)}%`,
-                  updated: new Date().toISOString().slice(0, 10),
-                };
+          const priorMemos = await tx.select().from(tables.memos).where(eq(tables.memos.companyId, companyId));
+          const [memo] = await tx
+            .insert(tables.memos)
+            .values({
+              companyId,
+              version: priorMemos.length + 1,
+              analyst: "Athena (draft)",
+              proposedAction: synthesis.memo.proposedAction,
+              proposedSize: synthesis.memo.proposedSize,
+              recommendation: synthesis.memo.recommendation,
+              investigationId,
+              content: JSON.stringify({
+                oneSentenceThesis: dossier.bullThesis.oneLiner,
+                variantPerception: dossier.bullThesis.variantPerception,
+                whyNow: dossier.bullThesis.whyNow,
+                businessQuality: synthesis.memo.businessQuality,
+                industryContext: synthesis.memo.industryContext,
+                evidenceTable: allClaims.slice(0, 10).map((c) => {
+                  const audit = auditByText.get(c.text.toLowerCase().slice(0, 60));
+                  return {
+                    claim: c.text,
+                    evidence: audit ? audit.verdict.replace("_", " ") : c.kind.replace("_", " "),
+                    source: c.source,
+                    confidence: `${Math.round((audit?.adjustedConfidence ?? c.confidence) * 100)}%`,
+                    updated: new Date().toISOString().slice(0, 10),
+                  };
+                }),
+                valuation: {
+                  bear: `${valuation.bear.value} — ${valuation.bear.logic}`,
+                  base: `${valuation.base.value} — ${valuation.base.logic}`,
+                  bull: `${valuation.bull.value} — ${valuation.bull.logic}`,
+                },
+                catalysts: catalyst.catalysts.map((c) => `${c.title} (${c.expectedDate}, p≈${Math.round(c.probability * 100)}%)`),
+                bearCase: strix.bearCase,
+                killCriteria: strix.killCriteria,
+                positionSizing: synthesis.memo.positionSizing,
+                monitoringPlan: synthesis.memo.monitoringPlan,
+                dissent: `Strix: “${strix.strongestDissent}”`,
+                finalRecommendation: synthesis.memo.finalRecommendation,
+                nextDiligenceSteps: synthesis.nextDiligenceSteps,
+                symposium: {
+                  debateId,
+                  verdict: verdict.verdict,
+                  conviction: verdict.conviction,
+                  crux: verdict.crux,
+                  resolvingEvidence: verdict.resolvingEvidence,
+                  probabilityBullCaseWorks: verdict.probabilityBullCaseWorks,
+                  logicVerdict: logicAudit.verdict,
+                  weakestPremise: logicAudit.weakestPremise,
+                  nonSequiturs: logicAudit.nonSequiturs,
+                },
               }),
-              valuation: {
-                bear: `${valuation.bear.value} — ${valuation.bear.logic}`,
-                base: `${valuation.base.value} — ${valuation.base.logic}`,
-                bull: `${valuation.bull.value} — ${valuation.bull.logic}`,
-              },
-              catalysts: catalyst.catalysts.map((c) => `${c.title} (${c.expectedDate}, p≈${Math.round(c.probability * 100)}%)`),
-              bearCase: strix.bearCase,
-              killCriteria: strix.killCriteria,
-              positionSizing: synthesis.memo.positionSizing,
-              monitoringPlan: synthesis.memo.monitoringPlan,
-              dissent: `Strix: “${strix.strongestDissent}”`,
-              finalRecommendation: synthesis.memo.finalRecommendation,
-              nextDiligenceSteps: synthesis.nextDiligenceSteps,
-              symposium: {
-                debateId,
-                verdict: verdict.verdict,
-                conviction: verdict.conviction,
-                crux: verdict.crux,
-                resolvingEvidence: verdict.resolvingEvidence,
-                probabilityBullCaseWorks: verdict.probabilityBullCaseWorks,
-                logicVerdict: logicAudit.verdict,
-                weakestPremise: logicAudit.weakestPremise,
-                nonSequiturs: logicAudit.nonSequiturs,
-              },
-            }),
-          })
-          .returning()
-          .all();
+            })
+            .returning();
 
-        saveRun("synthesis", synthesis, "IC synthesis", synthesisM.modelId, companyId, synthesisMeta);
-        db.update(tables.debates).set({ memoId: memo.id }).where(eq(tables.debates.id, debateId)).run();
+          await tx.update(tables.debates).set({ memoId: memo.id }).where(eq(tables.debates.id, debateId));
 
-        return memo.id;
+          return { companyId, memoId: memo.id };
         });
         persisted = true;
+
+        // Append-only telemetry recorded after the atomic commit: each agent's
+        // research trace (with companyId) + the synthesis run.
+        await saveTrace("DossierAgent", dossier.trace, companyId);
+        await saveTrace("AccountingAgent", accounting.trace, companyId);
+        await saveTrace("IndustryAgent", industry.trace, companyId);
+        await saveTrace("CatalystAgent", catalyst.trace, companyId);
+        await saveTrace("ValuationAgent", valuation.trace, companyId);
+        await saveTrace("Strix", strix.trace, companyId);
+        await saveTrace("EvidenceAuditor", auditor.trace, companyId);
+        await saveTrace("Athena", synthesis.trace, companyId);
+        await saveRun("synthesis", synthesis, "IC synthesis", synthesisM.modelId, companyId, synthesisMeta);
 
         emit({
           stage: "done",
@@ -502,21 +493,20 @@ export async function POST(req: NextRequest) {
         // complete.
         if (!persisted) {
           try {
-            db.transaction(() => {
-              const orphanDebates = db
+            await db.transaction(async (tx) => {
+              const orphanDebates = await tx
                 .select({ id: tables.debates.id })
                 .from(tables.debates)
-                .where(eq(tables.debates.investigationId, investigationId))
-                .all();
+                .where(eq(tables.debates.investigationId, investigationId));
               for (const d of orphanDebates) {
-                db.delete(tables.debateTurns).where(eq(tables.debateTurns.debateId, d.id)).run();
+                await tx.delete(tables.debateTurns).where(eq(tables.debateTurns.debateId, d.id));
               }
-              db.delete(tables.debates).where(eq(tables.debates.investigationId, investigationId)).run();
-              db.delete(tables.researchQuestions)
-                .where(eq(tables.researchQuestions.investigationId, investigationId))
-                .run();
-              db.delete(tables.traces).where(eq(tables.traces.investigationId, investigationId)).run();
-              db.delete(tables.agentRuns).where(eq(tables.agentRuns.investigationId, investigationId)).run();
+              await tx.delete(tables.debates).where(eq(tables.debates.investigationId, investigationId));
+              await tx
+                .delete(tables.researchQuestions)
+                .where(eq(tables.researchQuestions.investigationId, investigationId));
+              await tx.delete(tables.traces).where(eq(tables.traces.investigationId, investigationId));
+              await tx.delete(tables.agentRuns).where(eq(tables.agentRuns.investigationId, investigationId));
             });
           } catch {
             // best-effort cleanup; the error below is what the client sees

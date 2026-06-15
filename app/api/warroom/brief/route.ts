@@ -82,14 +82,12 @@ ${JSON.stringify(positionState, null, 2)}
 Produce today's navigation brief: a stance per position (hold/trim/add/exit with size delta), the cash stance, and what would change the council's mind.`,
     });
 
-    const [row] = db
+    const [row] = await db
       .insert(tables.councilBriefs)
       .values({ regime: regime.read, content: JSON.stringify(brief satisfies CouncilBrief) })
-      .returning()
-      .all();
+      .returning();
 
-    db.insert(tables.traces)
-      .values({
+    await db.insert(tables.traces).values({
         researcher: "WarRoomCouncil",
         ticker: null,
         currentQuestion: "How should the book be navigated today?",
@@ -101,8 +99,7 @@ Produce today's navigation brief: a stance per position (hold/trim/add/exit with
         confidenceChange: 0,
         nextAction: brief.cashStance.slice(0, 160),
         reasoningPattern: "The book is navigated daily: regime read, mandate check, per-position stance, cash decision.",
-      })
-      .run();
+    });
 
     return Response.json({ briefId: row.id, regime, brief, model: m.modelId });
   } catch (err) {

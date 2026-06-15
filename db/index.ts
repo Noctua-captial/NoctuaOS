@@ -1,28 +1,28 @@
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import * as schema from "./schema";
-import path from "path";
 
-const dbPath = process.env.NOCTUA_DB_PATH ?? path.join(process.cwd(), "noctua.db");
+// Supabase Postgres via the Supavisor transaction pooler (serverless-safe).
+// `prepare: false` is REQUIRED for the transaction pooler (it can't keep
+// prepared statements across pooled connections). Keep the pool small — each
+// serverless instance opens its own connections behind the pooler.
+const connectionString =
+  process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.POSTGRES_PRISMA_URL ?? "";
 
-const sqlite = new Database(dbPath);
-sqlite.pragma("journal_mode = WAL");
+function makeClient() {
+  return postgres(connectionString, {
+    prepare: false,
+    max: Number(process.env.NOCTUA_PG_MAX ?? 3),
+    idle_timeout: 20,
+    connect_timeout: 15,
+  });
+}
 
-// FTS5 index over chunks for keyword retrieval (works with no API key).
-sqlite.exec(`
-  CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    text,
-    content='chunks',
-    content_rowid='id'
-  );
-  CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
-  END;
-  CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
-  END;
-`);
+// Reuse one client across HMR reloads (dev) and warm serverless invocations so
+// we don't exhaust connections.
+const globalForDb = globalThis as unknown as { __noctuaPg?: ReturnType<typeof makeClient> };
+export const sqlClient = globalForDb.__noctuaPg ?? makeClient();
+if (process.env.NODE_ENV !== "production") globalForDb.__noctuaPg = sqlClient;
 
-export const sqliteRaw = sqlite;
-export const db = drizzle(sqlite, { schema });
+export const db = drizzle(sqlClient, { schema });
 export * as tables from "./schema";

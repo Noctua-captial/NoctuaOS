@@ -1,67 +1,66 @@
-// Verifies the Track C persistence guarantees against a throwaway in-memory DB:
+// Verifies the Track C persistence guarantees against in-process Postgres
+// (PGlite) — the real dialect the app now runs on:
 //   1. re-running an investigation replaces the prior run's agent claims but
-//      preserves analyst-added claims (the idempotency predicate used in
+//      preserves analyst-added claims (the idempotency predicate in
 //      app/api/athena/route.ts), and
-//   2. better-sqlite3 transactions roll back atomically on failure (so a failed
+//   2. Postgres transactions roll back atomically on failure (so a failed
 //      commit leaves no partial research memory).
 import { describe, it, expect, beforeEach } from "vitest";
-import Database from "better-sqlite3";
-import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 import { and, eq, isNotNull } from "drizzle-orm";
 import * as schema from "@/db/schema";
 
-type DB = BetterSQLite3Database<typeof schema>;
+type DB = PgliteDatabase<typeof schema>;
 
-function freshDb(): DB {
-  const sqlite = new Database(":memory:");
-  sqlite.exec(`
+async function freshDb(): Promise<DB> {
+  const client = new PGlite(); // ephemeral in-memory Postgres
+  const db = drizzle(client, { schema });
+  await client.exec(`
     CREATE TABLE claims (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      company_id INTEGER NOT NULL,
-      text TEXT NOT NULL,
-      kind TEXT NOT NULL DEFAULT 'unverified',
-      supports TEXT NOT NULL DEFAULT 'neutral',
-      confidence REAL NOT NULL DEFAULT 0.5,
-      source TEXT,
-      source_type TEXT,
-      investigation_id TEXT,
-      updated_at INTEGER
+      id serial PRIMARY KEY,
+      company_id integer NOT NULL,
+      text text NOT NULL,
+      kind text NOT NULL DEFAULT 'unverified',
+      supports text NOT NULL DEFAULT 'neutral',
+      confidence double precision NOT NULL DEFAULT 0.5,
+      source text,
+      source_type text,
+      investigation_id text,
+      updated_at timestamptz
     );
   `);
-  return drizzle(sqlite, { schema });
+  return db;
 }
 
 /** Mirrors the route's replace-then-insert for one company's agent claims. */
-function commitAgentClaims(db: DB, companyId: number, investigationId: string, texts: string[]) {
-  db.transaction(() => {
-    db.delete(schema.claims)
-      .where(and(eq(schema.claims.companyId, companyId), isNotNull(schema.claims.investigationId)))
-      .run();
-    db.insert(schema.claims)
-      .values(texts.map((text) => ({ companyId, text, investigationId })))
-      .run();
+async function commitAgentClaims(db: DB, companyId: number, investigationId: string, texts: string[]) {
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(schema.claims)
+      .where(and(eq(schema.claims.companyId, companyId), isNotNull(schema.claims.investigationId)));
+    await tx.insert(schema.claims).values(texts.map((text) => ({ companyId, text, investigationId })));
   });
 }
 
-describe("investigation idempotency", () => {
+describe("investigation idempotency (Postgres)", () => {
   let db: DB;
-  beforeEach(() => {
-    db = freshDb();
+  beforeEach(async () => {
+    db = await freshDb();
   });
 
-  it("replaces a prior run's agent claims while preserving analyst claims", () => {
+  it("replaces a prior run's agent claims while preserving analyst claims", async () => {
     // An analyst adds a claim by hand (no investigationId).
-    db.insert(schema.claims).values({ companyId: 1, text: "analyst: channel checks confirm demand" }).run();
+    await db.insert(schema.claims).values({ companyId: 1, text: "analyst: channel checks confirm demand" });
     // First investigation.
-    commitAgentClaims(db, 1, "run-1", ["agent: revenue accelerating", "agent: margins expanding"]);
+    await commitAgentClaims(db, 1, "run-1", ["agent: revenue accelerating", "agent: margins expanding"]);
 
-    let rows = db.select().from(schema.claims).all();
-    expect(rows.length).toBe(3);
+    expect((await db.select().from(schema.claims)).length).toBe(3);
 
     // Re-investigate: agent claims are replaced, analyst claim survives.
-    commitAgentClaims(db, 1, "run-2", ["agent: revised — revenue decelerating"]);
+    await commitAgentClaims(db, 1, "run-2", ["agent: revised — revenue decelerating"]);
 
-    rows = db.select().from(schema.claims).all();
+    const rows = await db.select().from(schema.claims);
     const analyst = rows.filter((r) => r.investigationId == null);
     const run1 = rows.filter((r) => r.investigationId === "run-1");
     const run2 = rows.filter((r) => r.investigationId === "run-2");
@@ -72,25 +71,25 @@ describe("investigation idempotency", () => {
     expect(rows.length).toBe(2);
   });
 
-  it("does not touch another company's claims", () => {
-    commitAgentClaims(db, 1, "run-a", ["co1 claim"]);
-    commitAgentClaims(db, 2, "run-b", ["co2 claim"]);
-    commitAgentClaims(db, 1, "run-a2", ["co1 revised"]);
-    expect(db.select().from(schema.claims).where(eq(schema.claims.companyId, 2)).all().length).toBe(1);
+  it("does not touch another company's claims", async () => {
+    await commitAgentClaims(db, 1, "run-a", ["co1 claim"]);
+    await commitAgentClaims(db, 2, "run-b", ["co2 claim"]);
+    await commitAgentClaims(db, 1, "run-a2", ["co1 revised"]);
+    expect((await db.select().from(schema.claims).where(eq(schema.claims.companyId, 2))).length).toBe(1);
   });
 
-  it("rolls back atomically when the commit throws (no partial write)", () => {
-    db.insert(schema.claims).values({ companyId: 1, text: "seed", investigationId: "old" }).run();
-    expect(() =>
-      db.transaction(() => {
-        db.delete(schema.claims).where(isNotNull(schema.claims.investigationId)).run();
-        db.insert(schema.claims).values({ companyId: 1, text: "new", investigationId: "new" }).run();
+  it("rolls back atomically when the commit throws (no partial write)", async () => {
+    await db.insert(schema.claims).values({ companyId: 1, text: "seed", investigationId: "old" });
+    await expect(
+      db.transaction(async (tx) => {
+        await tx.delete(schema.claims).where(isNotNull(schema.claims.investigationId));
+        await tx.insert(schema.claims).values({ companyId: 1, text: "new", investigationId: "new" });
         throw new Error("synthesis failed mid-commit");
       }),
-    ).toThrow("synthesis failed mid-commit");
+    ).rejects.toThrow("synthesis failed mid-commit");
 
     // The delete + insert both rolled back: the original row is intact.
-    const rows = db.select().from(schema.claims).all();
+    const rows = await db.select().from(schema.claims);
     expect(rows.length).toBe(1);
     expect(rows[0].text).toBe("seed");
   });

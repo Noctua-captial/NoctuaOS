@@ -1,16 +1,20 @@
-import { db, tables } from "./index";
+import { sql } from "drizzle-orm";
+import { db, sqlClient, tables } from "./index";
 
 async function seed() {
-  // wipe in dependency order
-  db.delete(tables.alerts).run();
-  db.delete(tables.memos).run();
-  db.delete(tables.scores).run();
-  db.delete(tables.catalysts).run();
-  db.delete(tables.claims).run();
-  db.delete(tables.theses).run();
-  db.delete(tables.companies).run();
+  // Full reset. CASCADE handles FK order. We don't RESTART IDENTITY (that needs
+  // sequence ownership the app role doesn't have); IDs are captured dynamically
+  // from .returning() below, so non-reset sequence values are harmless.
+  await db.execute(
+    sql.raw(
+      `TRUNCATE TABLE companies, theses, claims, catalysts, scores, memos, documents, chunks,
+       agent_runs, traces, quotes, fundamentals, positions, postmortems, quant_snapshots,
+       research_questions, debates, debate_turns, portfolio, council_briefs, signals,
+       news_items, directives, alerts CASCADE`,
+    ),
+  );
 
-  const [tsem] = db
+  const [tsem] = await db
     .insert(tables.companies)
     .values({
       ticker: "TSEM",
@@ -25,10 +29,9 @@ async function seed() {
       businessSummary:
         "Specialty analog foundry (SiGe, SiPho, RF, power management) with leverage to optical interconnect demand in AI data centers. Underfollowed relative to leading-edge logic names.",
     })
-    .returning()
-    .all();
+    .returning();
 
-  const [mu] = db
+  const [mu] = await db
     .insert(tables.companies)
     .values({
       ticker: "MU",
@@ -43,10 +46,9 @@ async function seed() {
       businessSummary:
         "One of three HBM-capable DRAM manufacturers. AI inference workloads are structurally increasing demand for memory bandwidth; HBM supply is sold out through next year.",
     })
-    .returning()
-    .all();
+    .returning();
 
-  const [aehr] = db
+  const [aehr] = await db
     .insert(tables.companies)
     .values({
       ticker: "AEHR",
@@ -61,10 +63,9 @@ async function seed() {
       businessSummary:
         "Wafer-level burn-in test systems. Original SiC thesis impaired by EV slowdown; potential second act in AI processor burn-in remains unproven.",
     })
-    .returning()
-    .all();
+    .returning();
 
-  const [apld] = db
+  const [apld] = await db
     .insert(tables.companies)
     .values({
       ticker: "APLD",
@@ -79,10 +80,9 @@ async function seed() {
       businessSummary:
         "HPC data-center developer with access to stranded power in North Dakota. Optionality on hyperscaler leases; balance-sheet risk from build-out financing.",
     })
-    .returning()
-    .all();
+    .returning();
 
-  const [leu] = db
+  const [leu] = await db
     .insert(tables.companies)
     .values({
       ticker: "LEU",
@@ -99,11 +99,10 @@ async function seed() {
       businessSummary:
         "Only US-licensed HALEU enrichment company. Long-term beneficiary of nuclear restart theme but near-term revenue concentrated in Russian-sourced LEU resale.",
     })
-    .returning()
-    .all();
+    .returning();
 
   // ---- TSEM dossier depth ----
-  db.insert(tables.theses)
+  await db.insert(tables.theses)
     .values({
       companyId: tsem.id,
       version: 2,
@@ -126,9 +125,9 @@ async function seed() {
         "Optical attach-rate thesis breaks at hyperscaler level — exit",
       ]),
     })
-    .run();
+    ;
 
-  db.insert(tables.claims)
+  await db.insert(tables.claims)
     .values([
       {
         companyId: tsem.id,
@@ -167,9 +166,9 @@ async function seed() {
         sourceType: "competitor",
       },
     ])
-    .run();
+    ;
 
-  db.insert(tables.catalysts)
+  await db.insert(tables.catalysts)
     .values([
       {
         companyId: tsem.id,
@@ -186,9 +185,9 @@ async function seed() {
         impact: "Confirms demand visibility behind capex commitment",
       },
     ])
-    .run();
+    ;
 
-  db.insert(tables.scores)
+  await db.insert(tables.scores)
     .values({
       companyId: tsem.id,
       total: 82,
@@ -207,10 +206,10 @@ async function seed() {
       rationale:
         "Score 82: evidence quality is strong, variant perception is high, catalyst is near-term, but liquidity and balance-sheet risk reduce position size.",
     })
-    .run();
+    ;
 
   // ---- MU depth ----
-  db.insert(tables.theses)
+  await db.insert(tables.theses)
     .values({
       companyId: mu.id,
       version: 1,
@@ -229,9 +228,9 @@ async function seed() {
         "Inference demand growth decelerates below GPU shipment growth — reassess",
       ]),
     })
-    .run();
+    ;
 
-  db.insert(tables.claims)
+  await db.insert(tables.claims)
     .values([
       {
         companyId: mu.id,
@@ -252,9 +251,9 @@ async function seed() {
         sourceType: "analyst_note",
       },
     ])
-    .run();
+    ;
 
-  db.insert(tables.catalysts)
+  await db.insert(tables.catalysts)
     .values([
       {
         companyId: mu.id,
@@ -264,9 +263,9 @@ async function seed() {
         impact: "Clarifies pricing power; thesis checkpoint",
       },
     ])
-    .run();
+    ;
 
-  db.insert(tables.scores)
+  await db.insert(tables.scores)
     .values({
       companyId: mu.id,
       total: 74,
@@ -285,10 +284,10 @@ async function seed() {
       rationale:
         "Score 74: thesis intact and evidence strengthening, but expected return is lower than at entry after multiple expansion. Hold; do not add above base-case threshold.",
     })
-    .run();
+    ;
 
   // ---- AEHR / APLD / LEU light data ----
-  db.insert(tables.theses)
+  await db.insert(tables.theses)
     .values({
       companyId: aehr.id,
       version: 3,
@@ -299,9 +298,9 @@ async function seed() {
       whatMustHappen: JSON.stringify(["A bookable AI processor burn-in order from a hyperscaler-adjacent customer"]),
       killCriteria: JSON.stringify(["No AI burn-in order within 2 quarters — remove from watchlist"]),
     })
-    .run();
+    ;
 
-  db.insert(tables.catalysts)
+  await db.insert(tables.catalysts)
     .values([
       {
         companyId: apld.id,
@@ -318,10 +317,10 @@ async function seed() {
         impact: "Only event that can revive the thesis",
       },
     ])
-    .run();
+    ;
 
   // ---- The Perch attention queue ----
-  db.insert(tables.alerts)
+  await db.insert(tables.alerts)
     .values([
       {
         companyId: aehr.id,
@@ -368,10 +367,10 @@ async function seed() {
         suggestedAction: "No action. Flag as potential add if weakness persists below base-case threshold.",
       },
     ])
-    .run();
+    ;
 
   // ---- TSEM IC memo (v2) ----
-  db.insert(tables.memos)
+  await db.insert(tables.memos)
     .values({
       companyId: tsem.id,
       version: 2,
@@ -428,9 +427,13 @@ async function seed() {
         finalRecommendation: "Approve — increase to 4.5% with kill criteria as stated.",
       }),
     })
-    .run();
+    ;
 
   console.log("Seeded Noctua OS database.");
+  await sqlClient.end();
 }
 
-seed();
+seed().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
