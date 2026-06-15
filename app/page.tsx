@@ -2,7 +2,7 @@ import Link from "next/link";
 import { desc, eq, asc } from "drizzle-orm";
 import { db, tables } from "@/db";
 import { StatusBadge, ThesisStatus, ScoreRing, TickerLink } from "@/components/ui";
-import { resolveAlert } from "@/app/actions";
+import { ResolveAlertButton } from "@/components/resolve-alert-button";
 import { computeRegime, checkMandate } from "@/lib/warroom";
 import { computeBookQuant } from "@/lib/quant";
 import { getQuotes } from "@/lib/market";
@@ -219,19 +219,7 @@ export default async function Perch() {
                     <span className="label !text-[9px]">{kindLabel[a.kind] ?? a.kind}</span>
                     <span className="ml-auto flex items-center gap-3">
                       {a.ticker && <TickerLink ticker={a.ticker} />}
-                      <form
-                        action={async () => {
-                          "use server";
-                          await resolveAlert(a.id);
-                        }}
-                      >
-                        <button
-                          className="label !text-[9px] opacity-50 transition-opacity hover:opacity-100"
-                          title="Resolve — remove from queue"
-                        >
-                          RESOLVE ✕
-                        </button>
-                      </form>
+                      <ResolveAlertButton id={a.id} />
                     </span>
                   </div>
                   <p className="text-[13.5px] leading-relaxed text-parchment">{a.message}</p>

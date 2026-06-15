@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
 
 const nav = [
   { href: "/", code: "01", name: "The Perch", desc: "Command center" },
@@ -17,6 +18,8 @@ const nav = [
 
 export function Sidebar({ authEnabled = false }: { authEnabled?: boolean }) {
   const pathname = usePathname();
+  const [open, setOpen] = useState(false);
+  const close = () => setOpen(false);
 
   async function lock() {
     await fetch("/api/auth", { method: "DELETE" }).catch(() => {});
@@ -24,19 +27,47 @@ export function Sidebar({ authEnabled = false }: { authEnabled?: boolean }) {
   }
 
   return (
-    <aside className="sticky top-0 z-20 flex h-screen w-60 shrink-0 flex-col border-r border-line bg-ink-raised">
-      <div className="border-b border-line px-6 py-7">
-        <Link href="/" className="block">
-          <div className="serif text-[26px] font-semibold tracking-wide text-parchment">
-            NOCTUA
-          </div>
-          <div className="label mt-1.5">Decision Intelligence</div>
-        </Link>
-      </div>
+    <>
+      {/* Mobile menu toggle — hidden once the rail is permanent at lg. */}
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-label={open ? "Close navigation" : "Open navigation"}
+        aria-expanded={open}
+        className="fixed left-3 top-3 z-50 flex h-9 w-9 items-center justify-center border border-line bg-ink-raised text-parchment lg:hidden"
+      >
+        <span className="text-lg leading-none">{open ? "\u2715" : "\u2630"}</span>
+      </button>
+
+      {/* Backdrop behind the drawer on mobile. */}
+      {open && (
+        <div
+          className="fixed inset-0 z-30 bg-black/60 lg:hidden"
+          onClick={() => setOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 flex h-screen w-60 shrink-0 flex-col border-r border-line bg-ink-raised transition-transform duration-200 lg:sticky lg:top-0 lg:z-20 lg:translate-x-0 ${
+          open ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        <div className="border-b border-line px-6 py-7">
+          <Link href="/" className="block" onClick={close}>
+            <div className="serif text-[26px] font-semibold tracking-wide text-parchment">
+              NOCTUA
+            </div>
+            <div className="label mt-1.5">Decision Intelligence</div>
+          </Link>
+        </div>
 
       <div className="px-3 pt-4">
         <button
-          onClick={() => window.dispatchEvent(new Event("noctua:command"))}
+          onClick={() => {
+            close();
+            window.dispatchEvent(new Event("noctua:command"));
+          }}
           className="flex w-full items-center gap-2.5 border border-line px-3 py-2.5 text-left transition-colors hover:border-line-strong hover:bg-ink-card"
         >
           <span className="serif text-sm text-parchment-faint">α</span>
@@ -55,6 +86,7 @@ export function Sidebar({ authEnabled = false }: { authEnabled?: boolean }) {
             <Link
               key={item.href}
               href={item.href}
+              onClick={close}
               className={`group mb-1 flex items-baseline gap-3 border px-3 py-2.5 transition-colors ${
                 active
                   ? "border-line-strong bg-ink-card"
@@ -94,6 +126,7 @@ export function Sidebar({ authEnabled = false }: { authEnabled?: boolean }) {
           )}
         </div>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

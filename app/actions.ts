@@ -4,9 +4,13 @@ import { revalidatePath } from "next/cache";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { db, tables } from "@/db";
 
-export async function resolveAlert(alertId: number) {
+/** Standard result shape so callers can surface success/failure in a toast. */
+export type ActionResult = { ok: boolean; message: string };
+
+export async function resolveAlert(alertId: number): Promise<ActionResult> {
   db.update(tables.alerts).set({ resolved: true }).where(eq(tables.alerts.id, alertId)).run();
   revalidatePath("/");
+  return { ok: true, message: "Alert resolved and cleared from the queue." };
 }
 
 export async function updateCompanyStatus(companyId: number, status: string) {
