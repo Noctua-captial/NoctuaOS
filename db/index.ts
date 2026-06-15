@@ -9,9 +9,21 @@ import * as schema from "./schema";
 const connectionString =
   process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.POSTGRES_PRISMA_URL ?? "";
 
+// Supabase (pooler and direct) requires TLS. postgres-js does NOT enable SSL by
+// default, so a connection string without an explicit `sslmode` would fail the
+// handshake. Auto-enable `require` (encrypt without CA verification — the
+// pooler presents a Supabase-managed cert) for Supabase hosts when the URL
+// doesn't already specify a mode, while leaving local/non-Supabase Postgres
+// (e.g. plain localhost in tests) untouched.
+function sslFor(cs: string): "require" | undefined {
+  if (/[?&]sslmode=/i.test(cs)) return undefined; // honor an explicit URL setting
+  return /\bsupabase\.(co|com)\b/i.test(cs) ? "require" : undefined;
+}
+
 function makeClient() {
   return postgres(connectionString, {
     prepare: false,
+    ssl: sslFor(connectionString),
     max: Number(process.env.NOCTUA_PG_MAX ?? 3),
     idle_timeout: 20,
     connect_timeout: 15,
