@@ -20,12 +20,21 @@ function sslFor(cs: string): "require" | undefined {
   return /\bsupabase\.(co|com)\b/i.test(cs) ? "require" : undefined;
 }
 
+// Pool sizing matters: pages and the export route issue several queries in a
+// single `Promise.all`, and streaming routes can run concurrently on a warm
+// instance. If concurrent queries ever exceed `max`, postgres-js queues the
+// overflow — and on the Supabase *transaction* pooler (port 6543) that queuing
+// poisons the pool (subsequent queries hang). Two mitigations:
+//   1) Keep `max` comfortably above the per-request fan-out (default 10).
+//   2) Prefer the *session* pooler (port 5432), which queues overflow cleanly.
+// See README "Deploy" for the recommended connection string.
 function makeClient() {
   return postgres(connectionString, {
     prepare: false,
     ssl: sslFor(connectionString),
-    max: Number(process.env.NOCTUA_PG_MAX ?? 3),
+    max: Number(process.env.NOCTUA_PG_MAX ?? 10),
     idle_timeout: 20,
+    max_lifetime: 60 * 30,
     connect_timeout: 15,
   });
 }

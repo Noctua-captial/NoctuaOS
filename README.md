@@ -87,7 +87,7 @@ npm run dev
 
 1. **Supabase** — create/keep a project (this one: `noctua-os`, region `us-east-1`). The schema lives in `drizzle/` and is applied via `npm run db:push` (or the committed migrations). The app connects through the **transaction pooler** as a least-privilege role (`noctua_web`); **Row Level Security is enabled on every table** with a policy granting that role access, so the public anon key cannot read or write.
 2. **Vercel** — import the repo (framework auto-detected as Next.js). In **Project Settings → Environment Variables**, set for **Production, Preview, and Development**:
-   - `DATABASE_URL` = the Supabase **Transaction pooler** connection string (`…pooler.supabase.com:6543`). Required.
+   - `DATABASE_URL` = the Supabase **Session pooler** connection string (`…pooler.supabase.com:5432`). Required. (Use the session pooler, not the transaction pooler: the app fans out several queries per request, and the transaction pooler poisons the connection pool when concurrent queries exceed `max`, whereas the session pooler queues them cleanly. `db/index.ts` auto-enables TLS and sizes the pool via `NOCTUA_PG_MAX`, default 10.)
    - Optional: provider keys (`XAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`), `EDGAR_USER_AGENT`, and `NOCTUA_ACCESS_TOKEN` (locks the whole terminal behind a sign-in when set).
 3. Push to the production branch (`main`); Vercel builds and deploys. `vercel.json` pins functions to `iad1`. Verify with `GET /api/health/db` (returns `{ ok: true }` when the database is reachable).
 
