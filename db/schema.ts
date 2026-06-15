@@ -100,10 +100,16 @@ export const agentRuns = sqliteTable("agent_runs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   companyId: integer("company_id").references(() => companies.id),
   ticker: text("ticker"),
-  agent: text("agent").notNull(), // dossier | thesis | strix | accounting | industry | catalyst | valuation | evidence_auditor | synthesis
+  agent: text("agent").notNull(), // dossier | thesis | strix | accounting | industry | catalyst | valuation | evidence_auditor | synthesis | research_tree | debate
   model: text("model"),
   inputSummary: text("input_summary"),
   output: text("output").notNull(), // JSON report
+  // Telemetry — populated per run for cost/latency visibility in /lab.
+  promptTokens: integer("prompt_tokens"),
+  completionTokens: integer("completion_tokens"),
+  totalTokens: integer("total_tokens"),
+  latencyMs: integer("latency_ms"),
+  llmCalls: integer("llm_calls").default(1), // >1 for aggregated stages (tree, debate)
   createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
 

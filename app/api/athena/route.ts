@@ -13,6 +13,7 @@ import {
   type Trace,
 } from "@/lib/athena";
 import { modelFor } from "@/lib/models";
+import type { RunMeta } from "@/lib/ai";
 import { vaultContext } from "@/lib/vault";
 import { computeNameQuant, type NameQuant } from "@/lib/quant";
 import { runResearchTree, runLogicAuditor, runDebate } from "@/lib/symposium";
@@ -34,9 +35,29 @@ export async function POST(req: NextRequest) {
       const emit = (event: Record<string, unknown>) =>
         controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
 
-      const saveRun = (agent: string, output: unknown, inputSummary: string, modelId: string, companyId?: number) => {
+      const saveRun = (
+        agent: string,
+        output: unknown,
+        inputSummary: string,
+        modelId: string,
+        companyId?: number,
+        meta?: { usage: RunMeta["usage"]; latencyMs: number },
+        calls = 1,
+      ) => {
         db.insert(tables.agentRuns)
-          .values({ companyId: companyId ?? null, ticker, agent, model: modelId, inputSummary, output: JSON.stringify(output) })
+          .values({
+            companyId: companyId ?? null,
+            ticker,
+            agent,
+            model: modelId,
+            inputSummary,
+            output: JSON.stringify(output),
+            promptTokens: meta?.usage.inputTokens ?? null,
+            completionTokens: meta?.usage.outputTokens ?? null,
+            totalTokens: meta?.usage.totalTokens ?? null,
+            latencyMs: meta?.latencyMs ?? null,
+            llmCalls: calls,
+          })
           .run();
       };
 
@@ -87,8 +108,8 @@ export async function POST(req: NextRequest) {
 
         // ---- Stage 1: Dossier + Thesis ----
         emit({ stage: "dossier", message: `Dossier Agent and Thesis Agent assigned to ${ticker}.` });
-        const dossier = await runDossierAgent(dossierM.model, ticker, vaultCtx, notes);
-        saveRun("dossier", dossier, `Investigation opened${notes ? ` — ${notes.slice(0, 80)}` : ""}`, dossierM.modelId);
+        const { object: dossier, meta: dossierMeta } = await runDossierAgent(dossierM.model, ticker, vaultCtx, notes);
+        saveRun("dossier", dossier, `Investigation opened${notes ? ` — ${notes.slice(0, 80)}` : ""}`, dossierM.modelId, undefined, dossierMeta);
         emit({ stage: "dossier", message: `Bull case formed: “${dossier.bullThesis.oneLiner}”` });
 
         // ---- Stage 1b: Quant snapshot (keyless ground truth) ----
@@ -103,16 +124,20 @@ export async function POST(req: NextRequest) {
 
         // ---- Stage 2: Specialist bench in parallel ----
         emit({ stage: "bench", message: "Bench assigned: Accounting, Industry, Catalyst, Valuation agents working in parallel." });
-        const [accounting, industry, catalyst, valuation] = await Promise.all([
+        const [accountingRun, industryRun, catalystRun, valuationRun] = await Promise.all([
           runAccountingAgent(accountingM.model, ticker, dossier, vaultCtx),
           runIndustryAgent(industryM.model, ticker, dossier, vaultCtx),
           runCatalystAgent(catalystM.model, ticker, dossier, vaultCtx),
           runValuationAgent(valuationM.model, ticker, dossier, vaultCtx),
         ]);
-        saveRun("accounting", accounting, "Financial quality review", accountingM.modelId);
-        saveRun("industry", industry, "Technical & competitive reality check", industryM.modelId);
-        saveRun("catalyst", catalyst, "Re-rating event map", catalystM.modelId);
-        saveRun("valuation", valuation, "Bear/base/bull cases", valuationM.modelId);
+        const accounting = accountingRun.object;
+        const industry = industryRun.object;
+        const catalyst = catalystRun.object;
+        const valuation = valuationRun.object;
+        saveRun("accounting", accounting, "Financial quality review", accountingM.modelId, undefined, accountingRun.meta);
+        saveRun("industry", industry, "Technical & competitive reality check", industryM.modelId, undefined, industryRun.meta);
+        saveRun("catalyst", catalyst, "Re-rating event map", catalystM.modelId, undefined, catalystRun.meta);
+        saveRun("valuation", valuation, "Bear/base/bull cases", valuationM.modelId, undefined, valuationRun.meta);
         emit({
           stage: "bench",
           message: `Bench reported. Accounting: ${accounting.redFlags.length} red flag(s). Industry: AI exposure ${industry.aiExposureReal ? "real" : "NOT structurally real"}. Catalysts mapped: ${catalyst.catalysts.length}.`,
@@ -133,16 +158,25 @@ export async function POST(req: NextRequest) {
           stage: "tree",
           message: `Research tree complete: ${tree.nodes.length} questions answered across ${Math.max(...tree.nodes.map((n) => n.depth), 1)} levels (${tree.calls} model calls).`,
         });
+        saveRun(
+          "research_tree",
+          { summary: tree.summary, nodeCount: tree.nodes.length },
+          `Recursive research tree — ${tree.nodes.length} questions`,
+          tree.modelId,
+          undefined,
+          { usage: tree.usage, latencyMs: tree.latencyMs },
+          tree.calls,
+        );
 
         // ---- Stage 2c: Logic Auditor ----
         emit({ stage: "logic", message: "Logic Auditor formalizing the thesis: premises → inference → conclusion." });
-        const { audit: logicAudit, modelId: logicModelId } = await runLogicAuditor({
+        const { audit: logicAudit, modelId: logicModelId, usage: logicUsage, latencyMs: logicLatency } = await runLogicAuditor({
           ticker,
           dossier,
           treeSummary: tree.summary,
           quant,
         });
-        saveRun("logic", logicAudit, "Premise-by-premise logic and science audit", logicModelId);
+        saveRun("logic", logicAudit, "Premise-by-premise logic and science audit", logicModelId, undefined, { usage: logicUsage, latencyMs: logicLatency });
         emit({
           stage: "logic",
           message: `Logic verdict: ${logicAudit.verdict.toUpperCase()}. ${logicAudit.nonSequiturs.length} non-sequitur(s). Weakest premise: ${logicAudit.weakestPremise.slice(0, 120)}`,
@@ -150,8 +184,8 @@ export async function POST(req: NextRequest) {
 
         // ---- Stage 3: Strix ----
         emit({ stage: "strix", message: "Releasing Strix to attack the thesis and the bench's findings." });
-        const strix = await runStrix(strixM.model, ticker, dossier, { accounting, industry, catalyst, valuation }, vaultCtx);
-        saveRun("strix", strix, "Adversarial review of full bench", strixM.modelId);
+        const { object: strix, meta: strixMeta } = await runStrix(strixM.model, ticker, dossier, { accounting, industry, catalyst, valuation }, vaultCtx);
+        saveRun("strix", strix, "Adversarial review of full bench", strixM.modelId, undefined, strixMeta);
         emit({ stage: "strix", message: `Dissent recorded: “${strix.strongestDissent.slice(0, 160)}…”` });
 
         // ---- Stage 4: Evidence Auditor ----
@@ -162,19 +196,19 @@ export async function POST(req: NextRequest) {
           ...industry.claims,
           ...strix.bearClaims.map((c) => ({ ...c, supports: "bear" as const })),
         ];
-        const auditor = await runEvidenceAuditor(
+        const { object: auditor, meta: auditorMeta } = await runEvidenceAuditor(
           auditorM.model,
           ticker,
           allClaims.map((c) => ({ text: c.text, kind: c.kind, confidence: c.confidence, source: c.source })),
           vaultCtx,
         );
-        saveRun("evidence_auditor", auditor, `Audited ${allClaims.length} claims`, auditorM.modelId);
+        saveRun("evidence_auditor", auditor, `Audited ${allClaims.length} claims`, auditorM.modelId, undefined, auditorMeta);
         const flagged = auditor.audits.filter((a) => a.verdict === "unsupported" || a.verdict === "contradicted").length;
         emit({ stage: "audit", message: `Audit complete: ${flagged} of ${auditor.audits.length} claims unsupported or contradicted. Weakest link: ${auditor.weakestLink.slice(0, 120)}` });
 
         // ---- Stage 5: The Debate Chamber ----
         emit({ stage: "debate", message: "Convening the Debate Chamber: Advocate vs Strix vs The Quant, Athena moderating." });
-        const { debateId, verdict } = await runDebate({
+        const { debateId, verdict, runs: debateRuns } = await runDebate({
           ticker,
           companyId: null, // linked after upsert
           dossier,
@@ -183,10 +217,14 @@ export async function POST(req: NextRequest) {
           quant,
           emit,
         });
+        // One telemetry row per model that argued in the chamber (4 models, ~14 calls).
+        for (const r of debateRuns) {
+          saveRun("debate", { seat: r.modelId }, "Debate Chamber turns", r.modelId, undefined, { usage: r.usage, latencyMs: r.latencyMs }, r.calls);
+        }
 
         // ---- Stage 6: Synthesis ----
         emit({ stage: "synthesis", message: "Athena scoring and drafting IC memo from the full Symposium." });
-        const synthesis = await runSynthesis(synthesisM.model, ticker, dossier, {
+        const { object: synthesis, meta: synthesisMeta } = await runSynthesis(synthesisM.model, ticker, dossier, {
           accounting, industry, catalyst, valuation, strix, auditor,
           symposium: {
             treeSummary: tree.summary,
@@ -389,7 +427,7 @@ export async function POST(req: NextRequest) {
           .returning()
           .all();
 
-        saveRun("synthesis", synthesis, "IC synthesis", synthesisM.modelId, companyId);
+        saveRun("synthesis", synthesis, "IC synthesis", synthesisM.modelId, companyId, synthesisMeta);
         db.update(tables.debates).set({ memoId: memo.id }).where(eq(tables.debates.id, debateId)).run();
 
         emit({

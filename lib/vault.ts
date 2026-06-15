@@ -1,7 +1,7 @@
 import { eq, inArray } from "drizzle-orm";
 import { db, tables, sqliteRaw } from "@/db";
-import { createOpenAI } from "@ai-sdk/openai";
 import { embedMany, embed } from "ai";
+import { embeddingModelFor } from "@/lib/models";
 
 // ---------- chunking ----------
 export function chunkText(text: string, target = 1800, overlap = 200): string[] {
@@ -20,11 +20,11 @@ export function chunkText(text: string, target = 1800, overlap = 200): string[] 
   return chunks.filter((c) => c.length > 80);
 }
 
-// ---------- embeddings (optional — activates when OPENAI_API_KEY is valid) ----------
+// ---------- embeddings (optional — resolved through the model router) ----------
+// The embedding model is configured in lib/models.ts (ROUTING.embeddings) and
+// overridable via NOCTUA_MODEL_EMBEDDINGS, rather than being hardcoded here.
 function embedder() {
-  if (!process.env.OPENAI_API_KEY) return null;
-  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  return openai.textEmbedding("text-embedding-3-small");
+  return embeddingModelFor()?.model ?? null;
 }
 
 async function tryEmbedMany(texts: string[]): Promise<(number[] | null)[]> {

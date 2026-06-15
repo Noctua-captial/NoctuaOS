@@ -1,13 +1,16 @@
 // The Symposium — recursive research tree, Logic Auditor, and the Debate Chamber.
 // Every question, answer, and debate turn is persisted and traced. Budgeted by design.
-import { generateObject } from "ai";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db, tables } from "@/db";
 import { CONSTITUTION, type DossierResult, type Trace } from "@/lib/athena";
 import { modelFor } from "@/lib/models";
+import { generateObjectRetry, addUsage, emptyUsage, type RunUsage } from "@/lib/ai";
 import { vaultContext } from "@/lib/vault";
 import type { NameQuant } from "@/lib/quant";
+
+/** Aggregated telemetry for a multi-call stage, grouped by the model that ran. */
+export type StageRun = { agent: string; modelId: string; usage: RunUsage; latencyMs: number; calls: number };
 
 const TREE_BUDGET = Number(process.env.NOCTUA_TREE_BUDGET ?? 6); // max question investigations per run
 const MAX_DEPTH = Number(process.env.NOCTUA_TREE_MAX_DEPTH ?? 3);
@@ -66,14 +69,17 @@ export async function runResearchTree(opts: {
   vaultCtx: string;
   emit: Emit;
   saveTrace: (researcher: string, trace: Trace) => void;
-}): Promise<{ nodes: TreeNode[]; summary: string; calls: number }> {
+}): Promise<{ nodes: TreeNode[]; summary: string; calls: number; modelId: string; usage: RunUsage; latencyMs: number }> {
   const { ticker, companyId, dossier, quant, vaultCtx, emit } = opts;
   const investigatorM = modelFor("investigator");
   let calls = 0;
+  let usage = emptyUsage();
+  let latencyMs = 0;
 
   // 1. Decompose the thesis into load-bearing questions
-  const { object: decomposition } = await generateObject({
+  const { object: decomposition, meta: decMeta } = await generateObjectRetry({
     model: investigatorM.model,
+    modelId: investigatorM.modelId,
     schema: decomposeSchema,
     system: CONSTITUTION,
     prompt: `Athena is decomposing the ${ticker} thesis into its load-bearing research questions.
@@ -85,6 +91,8 @@ ${quantBlock(quant)}
 Identify the 3-5 questions on which this thesis actually stands or falls. Not background questions — the ones where a bad answer kills the trade. Route each to the right specialty.`,
   });
   calls++;
+  usage = addUsage(usage, decMeta.usage);
+  latencyMs += decMeta.latencyMs;
 
   const nodes: TreeNode[] = [];
   type QueueItem = { question: string; specialty: string; parentId: number | null; depth: number };
@@ -121,8 +129,9 @@ Identify the 3-5 questions on which this thesis actually stands or falls. Not ba
     // Question-specific vault retrieval sharpens grounding beyond the global context
     const localCtx = await vaultContext(ticker, [item.question], 3).catch(() => "");
 
-    const { object: result } = await generateObject({
+    const { object: result, meta: invMeta } = await generateObjectRetry({
       model: investigatorM.model,
+      modelId: investigatorM.modelId,
       schema: investigateSchema,
       system: CONSTITUTION,
       prompt: `${vaultCtx}\n\n${localCtx}\n\n========\n\nYou are a ${item.specialty} specialist investigating one question in the ${ticker} research tree (depth ${item.depth} of ${MAX_DEPTH}).
@@ -136,6 +145,8 @@ QUESTION: ${item.question}
 Answer it as directly as the evidence allows. Be honest about confidence. Spawn child questions ONLY if your confidence is below ${SPAWN_THRESHOLD} AND a sharper, narrower question would genuinely resolve the uncertainty.`,
     });
     calls++;
+    usage = addUsage(usage, invMeta.usage);
+    latencyMs += invMeta.latencyMs;
 
     const willSpawn =
       result.confidence < SPAWN_THRESHOLD && result.childQuestions.length > 0 && item.depth < MAX_DEPTH;
@@ -193,6 +204,15 @@ Answer it as directly as the evidence allows. Be honest about confidence. Spawn 
     }
   }
 
+  // Be honest when the budget cuts the investigation short rather than silently
+  // dropping the remaining queue.
+  if (queue.length > 0) {
+    emit({
+      stage: "tree",
+      message: `Budget reached (${TREE_BUDGET} investigations). ${queue.length} deeper question(s) deferred to a future run.`,
+    });
+  }
+
   const summary = nodes
     .map(
       (n) =>
@@ -200,7 +220,7 @@ Answer it as directly as the evidence allows. Be honest about confidence. Spawn 
     )
     .join("\n");
 
-  return { nodes, summary, calls };
+  return { nodes, summary, calls, modelId: investigatorM.modelId, usage, latencyMs };
 }
 
 // ---------- Logic Auditor ----------
@@ -229,10 +249,11 @@ export async function runLogicAuditor(opts: {
   dossier: DossierResult;
   treeSummary: string;
   quant: NameQuant | null;
-}): Promise<{ audit: LogicAudit; modelId: string }> {
+}): Promise<{ audit: LogicAudit; modelId: string; usage: RunUsage; latencyMs: number }> {
   const m = modelFor("logic");
-  const { object } = await generateObject({
+  const { object, meta } = await generateObjectRetry({
     model: m.model,
+    modelId: m.modelId,
     schema: logicAuditSchema,
     system: CONSTITUTION,
     prompt: `You are the Logic Auditor. Your job is formal rigor: formalize the ${opts.ticker} thesis as premises → inference → conclusion and stress-test the logic and the science. You do not care about the story; you care whether the argument is valid and the mechanism physically and economically real.
@@ -246,7 +267,7 @@ ${quantBlock(opts.quant)}
 
 Identify every premise the conclusion depends on, check each against the tree findings, flag non-sequiturs, and name the weakest premise. "Sound" requires every load-bearing premise supported AND a valid inference chain.`,
   });
-  return { audit: object, modelId: m.modelId };
+  return { audit: object, modelId: m.modelId, usage: meta.usage, latencyMs: meta.latencyMs };
 }
 
 // ---------- The Debate Chamber ----------
@@ -293,7 +314,7 @@ export async function runDebate(opts: {
   logicAudit: LogicAudit | null;
   quant: NameQuant | null;
   emit: Emit;
-}): Promise<{ debateId: number; verdict: DebateVerdict }> {
+}): Promise<{ debateId: number; verdict: DebateVerdict; runs: StageRun[] }> {
   const { ticker, companyId, dossier, treeSummary, logicAudit, quant, emit } = opts;
 
   const [debate] = db
@@ -301,6 +322,20 @@ export async function runDebate(opts: {
     .values({ companyId, ticker, status: "running" })
     .returning()
     .all();
+
+  // Accumulate token/latency telemetry per model — the debate spans 4 models,
+  // so attributing cost to a single one would be misleading.
+  const runsByModel = new Map<string, StageRun>();
+  const accrue = (modelId: string, usage: RunUsage, latencyMs: number) => {
+    const prev = runsByModel.get(modelId);
+    if (prev) {
+      prev.usage = addUsage(prev.usage, usage);
+      prev.latencyMs += latencyMs;
+      prev.calls += 1;
+    } else {
+      runsByModel.set(modelId, { agent: "debate", modelId, usage, latencyMs, calls: 1 });
+    }
+  };
 
   let turnIdx = 0;
   const saveTurn = (round: string, seat: string, content: string, modelId: string) => {
@@ -325,12 +360,14 @@ ${quantBlock(quant)}`;
 
   async function seatTurn(seat: Seat, round: string, instruction: string) {
     const m = modelFor(seatAgent[seat]);
-    const { object } = await generateObject({
+    const { object, meta } = await generateObjectRetry({
       model: m.model,
+      modelId: m.modelId,
       schema: turnSchema,
       system: `${CONSTITUTION}\n\n${seatBrief[seat]}`,
       prompt: `${dossierBlock}\n\nDEBATE SO FAR:\n${transcriptBlock() || "(none — this is the opening round)"}\n\n${instruction}`,
     });
+    accrue(m.modelId, meta.usage, meta.latencyMs);
     transcript.push({ round, seat, argument: object.argument });
     saveTurn(round, seat, JSON.stringify(object), m.modelId);
     return object;
@@ -356,12 +393,14 @@ ${quantBlock(quant)}`;
 
   // Round 3 — cross-examination: moderator poses the crux question
   const moderatorM = modelFor("synthesis");
-  const cruxQ = await generateObject({
+  const cruxQ = await generateObjectRetry({
     model: moderatorM.model,
+    modelId: moderatorM.modelId,
     schema: z.object({ cruxQuestion: z.string().describe("The single question whose answer decides this debate") }),
     system: `${CONSTITUTION}\n\nYou are Athena, moderating the Investment Committee debate.`,
     prompt: `${dossierBlock}\n\nDEBATE SO FAR:\n${transcriptBlock()}\n\nIdentify the crux: the single question whose answer decides this debate. Pose it to all three seats.`,
   });
+  accrue(moderatorM.modelId, cruxQ.meta.usage, cruxQ.meta.latencyMs);
   saveTurn("cross", "moderator", JSON.stringify(cruxQ.object), moderatorM.modelId);
   emit({ stage: "debate", message: `Cross-examination. Athena poses the crux: "${cruxQ.object.cruxQuestion.slice(0, 140)}"` });
 
@@ -387,12 +426,14 @@ ${quantBlock(quant)}`;
   });
 
   // Verdict
-  const { object: verdict } = await generateObject({
+  const { object: verdict, meta: verdictMeta } = await generateObjectRetry({
     model: moderatorM.model,
+    modelId: moderatorM.modelId,
     schema: verdictSchema,
     system: `${CONSTITUTION}\n\nYou are Athena, moderating. Weigh arguments by evidence quality, not eloquence. Strix being wrong must be demonstrated, not asserted.`,
     prompt: `${dossierBlock}\n\nFULL DEBATE TRANSCRIPT:\n${transcriptBlock()}\n\nDeliver the verdict: pursue / watchlist / reject, your conviction, how the debate resolved, the remaining crux, and the specific obtainable evidence that would resolve it.`,
   });
+  accrue(moderatorM.modelId, verdictMeta.usage, verdictMeta.latencyMs);
   saveTurn("verdict", "moderator", JSON.stringify(verdict), moderatorM.modelId);
 
   db.update(tables.debates)
@@ -424,5 +465,5 @@ ${quantBlock(quant)}`;
     message: `Verdict: ${verdict.verdict.toUpperCase()} (conviction ${(verdict.conviction * 100).toFixed(0)}%). Crux logged as a pending research question.`,
   });
 
-  return { debateId: debate.id, verdict };
+  return { debateId: debate.id, verdict, runs: [...runsByModel.values()] };
 }
