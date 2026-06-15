@@ -3,8 +3,6 @@
 // thesis staleness) always run. The LLM relevance pass activates only when a
 // provider key is configured; on any model failure it degrades silently to
 // the plain filing alert that has already been raised.
-import fs from "fs";
-import path from "path";
 import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import { generateObject } from "ai";
 import { z } from "zod";
@@ -21,25 +19,39 @@ const SIGNAL_UNUSUAL_VOLUME_Z = 2.5;
 const SIGNAL_SHORT_Z = 2.5;
 const SIGNAL_NEWS_BURST_ITEMS = 6; // items inside 48h
 
-// ---------- throttle state (gitignored file, not the repo DB) ----------
-const STATE_FILE = path.join(process.cwd(), ".nightvision.json");
+// ---------- throttle state (DB-backed; serverless-safe) ----------
+// The previous implementation wrote a JSON file under process.cwd(), which
+// throws EROFS on Vercel's read-only filesystem and is per-instance even where
+// writable. Persisting in the `kv` table makes the 10-minute throttle correct
+// and shared across the whole serverless fleet.
+const SCAN_KEY = "nightvision:lastScanAt";
 
 export const SCAN_INTERVAL_MS = 10 * 60 * 1000;
 
 /** Timestamp of the last scan, or null if Night Vision has never run. */
-export function lastScan(): Date | null {
+export async function lastScan(): Promise<Date | null> {
   try {
-    const raw = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) as { lastScanAt?: string };
-    if (!raw.lastScanAt) return null;
-    const d = new Date(raw.lastScanAt);
+    const rows = await db
+      .select({ value: tables.kv.value })
+      .from(tables.kv)
+      .where(eq(tables.kv.key, SCAN_KEY))
+      .limit(1);
+    const v = rows[0]?.value;
+    if (!v) return null;
+    const d = new Date(v);
     return Number.isNaN(d.getTime()) ? null : d;
   } catch {
     return null;
   }
 }
 
-function recordScan(): void {
-  fs.writeFileSync(STATE_FILE, JSON.stringify({ lastScanAt: new Date().toISOString() }) + "\n");
+async function recordScan(): Promise<void> {
+  const now = new Date();
+  const iso = now.toISOString();
+  await db
+    .insert(tables.kv)
+    .values({ key: SCAN_KEY, value: iso, updatedAt: now })
+    .onConflictDoUpdate({ target: tables.kv.key, set: { value: iso, updatedAt: now } });
 }
 
 // ---------- events ----------
@@ -202,7 +214,7 @@ function daysUntil(expectedDate: string | null): number | null {
 export async function runNightVisionScan(
   emit: Emit,
 ): Promise<{ alertsRaised: number; documentsIngested: number }> {
-  recordScan();
+  await recordScan();
 
   const companies = await db
     .select()

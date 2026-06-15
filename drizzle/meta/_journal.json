@@ -8,6 +8,13 @@
       "when": 1781531112064,
       "tag": "0000_noctua_pg_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1781533487679,
+      "tag": "0001_kv_app_state",
+      "breakpoints": true
     }
   ]
 }

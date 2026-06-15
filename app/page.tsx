@@ -40,7 +40,7 @@ function daysUntil(dateStr: string | null): number | null {
 }
 
 export default async function Perch() {
-  const [alerts, companies, catalystRows, memoRows, openPositions] = await Promise.all([
+  const [alerts, companies, catalystRows, memoRows, openPositions, lastScanAt] = await Promise.all([
     db
       .select()
       .from(tables.alerts)
@@ -60,6 +60,7 @@ export default async function Perch() {
       .orderBy(desc(tables.memos.createdAt))
       .limit(5),
     db.select().from(tables.positions).where(eq(tables.positions.status, "open")),
+    lastScan(),
   ]);
 
   // Live P&L for the Talons panel — quotes fail silently, panel still renders.
@@ -147,7 +148,7 @@ export default async function Perch() {
             </h1>
           </div>
           <div className="flex items-start gap-3">
-            <ScanButton lastScanAt={lastScan()?.toISOString() ?? null} />
+            <ScanButton lastScanAt={lastScanAt?.toISOString() ?? null} />
             <Link href="/new" className="btn btn-primary">
               + NEW INVESTIGATION
             </Link>

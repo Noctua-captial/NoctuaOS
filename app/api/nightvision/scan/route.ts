@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
     // empty body — treat as a normal (throttled) scan request
   }
 
-  const last = lastScan();
+  const last = await lastScan();
   if (!force && last && Date.now() - last.getTime() < SCAN_INTERVAL_MS) {
     return Response.json({
       skipped: true,

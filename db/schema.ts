@@ -327,3 +327,12 @@ export const alerts = pgTable("alerts", {
   resolved: boolean("resolved").notNull().default(false),
   createdAt: ts("created_at").$defaultFn(() => new Date()),
 });
+
+// Small key/value store for app state that must persist across the serverless
+// fleet (where the local filesystem is read-only and ephemeral). Used for the
+// Night Vision scan throttle; intentionally generic for future flags.
+export const kv = pgTable("kv", {
+  key: text("key").primaryKey(),
+  value: text("value"),
+  updatedAt: ts("updated_at").$defaultFn(() => new Date()),
+});
