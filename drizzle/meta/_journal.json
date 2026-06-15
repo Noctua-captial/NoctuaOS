@@ -15,6 +15,13 @@
       "when": 1781533487679,
       "tag": "0001_kv_app_state",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781538058841,
+      "tag": "0002_vault_fts_and_indexes",
+      "breakpoints": true
     }
   ]
 }

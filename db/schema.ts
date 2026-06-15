@@ -6,12 +6,21 @@ import {
   doublePrecision,
   timestamp,
   boolean,
+  index,
+  customType,
 } from "drizzle-orm/pg-core";
+import { sql, type SQL } from "drizzle-orm";
 
 // Postgres (Supabase) schema. Floats use doublePrecision to match SQLite's
 // 8-byte REAL; timestamps use mode:"date" so callers keep getting Date objects.
 // JSON payloads remain `text` (the app does JSON.stringify/parse itself).
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
+
+// Postgres full-text search vector. Drizzle has no first-class tsvector type, so
+// we declare one; the column itself is GENERATED ALWAYS from chunks.text.
+const tsvector = customType<{ data: string }>({
+  dataType: () => "tsvector",
+});
 
 export const companies = pgTable("companies", {
   id: serial("id").primaryKey(),
@@ -94,28 +103,40 @@ export const memos = pgTable("memos", {
   createdAt: ts("created_at").$defaultFn(() => new Date()),
 });
 
-export const documents = pgTable("documents", {
-  id: serial("id").primaryKey(),
-  companyId: integer("company_id").references(() => companies.id),
-  ticker: text("ticker"),
-  title: text("title").notNull(),
-  docType: text("doc_type").notNull().default("note"), // filing | transcript | presentation | note | article | expert_call
-  formType: text("form_type"), // 10-K | 10-Q | 8-K | ...
-  source: text("source"), // URL or provenance
-  filedAt: text("filed_at"), // ISO date
-  content: text("content").notNull(),
-  createdAt: ts("created_at").$defaultFn(() => new Date()),
-});
+export const documents = pgTable(
+  "documents",
+  {
+    id: serial("id").primaryKey(),
+    companyId: integer("company_id").references(() => companies.id),
+    ticker: text("ticker"),
+    title: text("title").notNull(),
+    docType: text("doc_type").notNull().default("note"), // filing | transcript | presentation | note | article | expert_call
+    formType: text("form_type"), // 10-K | 10-Q | 8-K | ...
+    source: text("source"), // URL or provenance
+    filedAt: text("filed_at"), // ISO date
+    content: text("content").notNull(),
+    createdAt: ts("created_at").$defaultFn(() => new Date()),
+  },
+  (t) => [index("documents_ticker_idx").on(t.ticker)],
+);
 
-export const chunks = pgTable("chunks", {
-  id: serial("id").primaryKey(),
-  documentId: integer("document_id").notNull().references(() => documents.id),
-  idx: integer("idx").notNull(),
-  text: text("text").notNull(),
-  embedding: text("embedding"), // JSON number[] when embeddings are enabled
-  // NOTE: a generated `tsv tsvector` column + GIN index are added in the
-  // migration SQL (drizzle's tsvector support is limited); Vault FTS uses it.
-});
+export const chunks = pgTable(
+  "chunks",
+  {
+    id: serial("id").primaryKey(),
+    documentId: integer("document_id").notNull().references(() => documents.id),
+    idx: integer("idx").notNull(),
+    text: text("text").notNull(),
+    embedding: text("embedding"), // JSON number[] when embeddings are enabled
+    // Keyword-search vector, generated from `text`. Queried (never written) by
+    // lib/vault.ts via to_tsquery/ts_rank. Excluded from inserts/selects in app code.
+    tsv: tsvector("tsv").generatedAlwaysAs((): SQL => sql`to_tsvector('english', ${chunks.text})`),
+  },
+  (t) => [
+    index("chunks_tsv_idx").using("gin", t.tsv),
+    index("chunks_document_id_idx").on(t.documentId),
+  ],
+);
 
 export const agentRuns = pgTable("agent_runs", {
   id: serial("id").primaryKey(),
@@ -275,16 +296,20 @@ export const councilBriefs = pgTable("council_briefs", {
   createdAt: ts("created_at").$defaultFn(() => new Date()),
 });
 
-export const signals = pgTable("signals", {
-  id: serial("id").primaryKey(),
-  ticker: text("ticker").notNull(),
-  kind: text("kind").notNull(), // options_flow | options_chain | short_pressure | insider | news_burst
-  value: doublePrecision("value"), // the headline metric for the kind (e.g. put/call ratio, short ratio, net insider $)
-  z: doublePrecision("z"), // z-score vs stored history; null until enough observations exist
-  asOf: text("as_of").notNull(), // the DATA's own timestamp/date (ISO), never our fetch time
-  payload: text("payload"), // JSON full detail
-  createdAt: ts("created_at").$defaultFn(() => new Date()),
-});
+export const signals = pgTable(
+  "signals",
+  {
+    id: serial("id").primaryKey(),
+    ticker: text("ticker").notNull(),
+    kind: text("kind").notNull(), // options_flow | options_chain | short_pressure | insider | news_burst
+    value: doublePrecision("value"), // the headline metric for the kind (e.g. put/call ratio, short ratio, net insider $)
+    z: doublePrecision("z"), // z-score vs stored history; null until enough observations exist
+    asOf: text("as_of").notNull(), // the DATA's own timestamp/date (ISO), never our fetch time
+    payload: text("payload"), // JSON full detail
+    createdAt: ts("created_at").$defaultFn(() => new Date()),
+  },
+  (t) => [index("signals_ticker_kind_idx").on(t.ticker, t.kind)],
+);
 
 export const newsItems = pgTable("news_items", {
   id: serial("id").primaryKey(),

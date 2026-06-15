@@ -75,13 +75,13 @@ Each agent emits a research trace (stored in `traces`) and a full report (stored
 
 ```bash
 npm install
-# .env.local must contain DATABASE_URL (Supabase transaction-pooler URL — see .env.example)
-npm run db:push      # apply the Drizzle schema to the database
+# .env.local must contain DATABASE_URL (Supabase session-pooler URL — see .env.example)
+npm run db:push      # apply the full Drizzle schema (tables, the chunks.tsv FTS column + GIN index, lookup indexes)
 npm run db:seed      # seed example dossiers (TSEM, MU, AEHR, APLD, LEU)
 npm run dev
 ```
 
-`db/index.ts` reads `DATABASE_URL` (falls back to `POSTGRES_URL`). TLS is auto-enabled for Supabase hosts.
+`db/index.ts` reads `DATABASE_URL` (falls back to `POSTGRES_URL`). TLS is auto-enabled for Supabase hosts. The schema (`db/schema.ts` + `drizzle/`) is the complete source of truth — including the generated `tsvector` column and indexes — so `db:push`/`drizzle-kit migrate` reproduce Vault full-text search on a fresh database. Row Level Security is **not** part of the Drizzle schema; for a brand-new database apply it (and the least-privilege app role) separately — see "Deploy". The existing `noctua-os` Supabase project is already fully provisioned (schema, FTS, indexes, RLS, seed data), so you only need to set `DATABASE_URL`.
 
 ## Deploy (Vercel + Supabase)
 
