@@ -4,6 +4,7 @@
 // as one "options_flow" row per ticker-day so daily volume totals accumulate
 // into a real z-score history.
 import { FETCH_TIMEOUT_MS, meanStd, num, signalHistory, upsertSignal } from "@/lib/signals/common";
+import { fetchExternal } from "@/lib/net";
 
 const CHAIN_TTL_MS = 15 * 60 * 1000;
 const UA =
@@ -157,11 +158,11 @@ export async function fetchChain(ticker: string): Promise<OptionChain> {
 
   let chain: OptionChain;
   try {
-    const res = await fetch(
+    const res = await fetchExternal(
       `https://cdn.cboe.com/api/global/delayed_quotes/options/${encodeURIComponent(t)}.json`,
       {
         headers: { "User-Agent": UA, Accept: "application/json" },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        timeoutMs: FETCH_TIMEOUT_MS,
       },
     );
     if (!res.ok) throw new Error(`CBOE chain fetch failed (${res.status}) for ${t}`);

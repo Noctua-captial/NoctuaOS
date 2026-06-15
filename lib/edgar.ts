@@ -1,5 +1,15 @@
-// SEC EDGAR ingestion — free, no API key. SEC requires a descriptive User-Agent.
-const UA = process.env.EDGAR_USER_AGENT ?? "NoctuaOS research internal@noctua.local";
+// SEC EDGAR ingestion — free, no API key. SEC's fair-access policy REQUIRES a
+// descriptive User-Agent with contact info and ≤10 req/s; set EDGAR_USER_AGENT
+// (see .env.example). All requests go through fetchSec, which enforces the
+// shared SEC rate limit, a timeout, and retries.
+import { fetchSec } from "@/lib/net";
+
+const UA = process.env.EDGAR_USER_AGENT ?? "NoctuaOS/0.1 (contact: set EDGAR_USER_AGENT)";
+if (!process.env.EDGAR_USER_AGENT) {
+  console.warn(
+    "[edgar] EDGAR_USER_AGENT is not set — using a placeholder UA. SEC may rate-limit or block requests; set it in .env.local.",
+  );
+}
 
 const headers = { "User-Agent": UA, "Accept-Encoding": "gzip" };
 
@@ -9,7 +19,7 @@ let tickerMapCache: Record<string, TickerEntry> | null = null;
 
 export async function tickerToCik(ticker: string): Promise<TickerEntry | null> {
   if (!tickerMapCache) {
-    const res = await fetch("https://www.sec.gov/files/company_tickers.json", { headers });
+    const res = await fetchSec("https://www.sec.gov/files/company_tickers.json", headers);
     if (!res.ok) throw new Error(`EDGAR ticker map fetch failed (${res.status})`);
     const raw = (await res.json()) as Record<string, TickerEntry>;
     tickerMapCache = {};
@@ -37,7 +47,7 @@ export async function recentFilings(
   if (!entry) throw new Error(`Ticker ${ticker} not found in EDGAR registry.`);
 
   const cik10 = String(entry.cik_str).padStart(10, "0");
-  const res = await fetch(`https://data.sec.gov/submissions/CIK${cik10}.json`, { headers });
+  const res = await fetchSec(`https://data.sec.gov/submissions/CIK${cik10}.json`, headers);
   if (!res.ok) throw new Error(`EDGAR submissions fetch failed (${res.status})`);
   const data = await res.json();
 
@@ -71,7 +81,7 @@ export async function recentFilings(
 
 /** Fetch a filing's primary document and strip it to readable text. */
 export async function fetchFilingText(url: string, maxChars = 600_000): Promise<string> {
-  const res = await fetch(url, { headers });
+  const res = await fetchSec(url, headers);
   if (!res.ok) throw new Error(`Filing fetch failed (${res.status}) for ${url}`);
   const html = await res.text();
   return htmlToText(html).slice(0, maxChars);
