@@ -70,6 +70,79 @@ const RND_MIN_DTE = 3;
 
 export type DirectiveAction = "BUY" | "ADD" | "HOLD" | "TRIM" | "EXIT" | "AVOID" | "HEDGE";
 
+/** Fused state the Oracle maps to an action. Pulled out of computeDirective so
+ *  the BUY/ADD/HOLD/TRIM/EXIT/AVOID/HEDGE gates are unit-testable in isolation. */
+export type DirectiveDecisionState = {
+  hasPosition: boolean;
+  dataBroken: boolean; // no live price / no fused posterior
+  posterior: number; // Bayesian P(thesis)
+  ev90dPct: number | null; // risk-adjusted 90d expected value, %
+  valuationOnFile: boolean; // memo has bear + base targets
+  hasHeadroom: boolean; // mandate headroom for more risk
+  headroomPct: number;
+  thesisBroken: boolean;
+  pHitKill: number | null; // MC probability of hitting the kill price by horizon
+  mandateBreach: boolean;
+  regimeStressed: boolean;
+  optionsLiquid: boolean; // a collar is realistically tradeable
+};
+
+/**
+ * Deterministic action selection. No position: BUY / AVOID / HOLD. With a
+ * position, precedence EXIT > TRIM > ADD > HEDGE > HOLD — the harshest
+ * applicable verdict wins; de-risking outranks adding. Pure: same state in,
+ * same action + decision path out.
+ */
+export function selectDirectiveAction(
+  s: DirectiveDecisionState,
+): { action: DirectiveAction; decisionPath: string } {
+  let action: DirectiveAction;
+  let decisionPath: string;
+  if (!s.hasPosition) {
+    if (s.dataBroken) {
+      action = "AVOID";
+      decisionPath = "no position · price/posterior data broken → AVOID";
+    } else if (s.posterior <= AVOID_POSTERIOR) {
+      action = "AVOID";
+      decisionPath = `no position · posterior ${s.posterior.toFixed(2)} ≤ ${AVOID_POSTERIOR} → AVOID`;
+    } else if (s.ev90dPct != null && s.ev90dPct <= 0 && s.valuationOnFile) {
+      action = "AVOID";
+      decisionPath = `no position · risk-adj EV90d ${s.ev90dPct.toFixed(1)}% ≤ 0 with targets on file → AVOID (memo math offers no payable upside)`;
+    } else if (s.posterior >= BUY_POSTERIOR && s.ev90dPct != null && s.ev90dPct > BUY_MIN_EV_PCT && s.hasHeadroom) {
+      action = "BUY";
+      decisionPath = `no position · posterior ${s.posterior.toFixed(2)} ≥ ${BUY_POSTERIOR}, EV90d ${s.ev90dPct.toFixed(1)}% > ${BUY_MIN_EV_PCT}%, headroom ${s.headroomPct.toFixed(1)}% → BUY`;
+    } else {
+      action = "HOLD";
+      decisionPath = `no position · posterior ${s.posterior.toFixed(2)} between gates${s.ev90dPct != null ? `, EV90d ${s.ev90dPct.toFixed(1)}%` : ", EV unavailable"} → HOLD (watch)`;
+    }
+  } else {
+    if (s.thesisBroken || s.posterior < EXIT_POSTERIOR) {
+      action = "EXIT";
+      decisionPath = s.thesisBroken
+        ? "open position · thesis marked BROKEN → EXIT"
+        : `open position · posterior ${s.posterior.toFixed(2)} < ${EXIT_POSTERIOR} → EXIT`;
+    } else if (s.posterior < TRIM_POSTERIOR || (s.pHitKill != null && s.pHitKill > TRIM_KILL_PROB) || s.mandateBreach) {
+      action = "TRIM";
+      decisionPath =
+        s.posterior < TRIM_POSTERIOR
+          ? `open position · posterior ${s.posterior.toFixed(2)} < ${TRIM_POSTERIOR} → TRIM`
+          : s.pHitKill != null && s.pHitKill > TRIM_KILL_PROB
+            ? `open position · P(hit kill) ${pct(s.pHitKill)} > ${pct(TRIM_KILL_PROB)} → TRIM`
+            : "open position · mandate breach → TRIM";
+    } else if (s.posterior >= ADD_POSTERIOR && s.hasHeadroom && (s.pHitKill == null || s.pHitKill < ADD_MAX_KILL_PROB)) {
+      action = "ADD";
+      decisionPath = `open position · posterior ${s.posterior.toFixed(2)} ≥ ${ADD_POSTERIOR}, headroom ${s.headroomPct.toFixed(1)}%, P(hit kill) ${s.pHitKill != null ? pct(s.pHitKill) : "n/a"} → ADD`;
+    } else if (s.posterior >= HEDGE_POSTERIOR && s.regimeStressed && s.optionsLiquid) {
+      action = "HEDGE";
+      decisionPath = `open position · posterior ${s.posterior.toFixed(2)} ≥ ${HEDGE_POSTERIOR} but regime stressed and options liquid → HEDGE`;
+    } else {
+      action = "HOLD";
+      decisionPath = `open position · posterior ${s.posterior.toFixed(2)} inside the hold band → HOLD`;
+    }
+  }
+  return { action, decisionPath };
+}
+
 export type CoverageStatus = "live" | "stale" | "missing";
 
 export type CoverageEntry = {
@@ -588,50 +661,20 @@ export async function computeDirective(ticker: string): Promise<Directive> {
   const dataBroken = spot == null || fused == null;
   const valuationOnFile = basePrice != null && bearPrice != null;
 
-  let action: DirectiveAction;
-  let decisionPath: string;
-  if (!hasPosition) {
-    if (dataBroken) {
-      action = "AVOID";
-      decisionPath = "no position · price/posterior data broken → AVOID";
-    } else if (posterior <= AVOID_POSTERIOR) {
-      action = "AVOID";
-      decisionPath = `no position · posterior ${posterior.toFixed(2)} ≤ ${AVOID_POSTERIOR} → AVOID`;
-    } else if (ev90dPct != null && ev90dPct <= 0 && valuationOnFile) {
-      action = "AVOID";
-      decisionPath = `no position · risk-adj EV90d ${ev90dPct.toFixed(1)}% ≤ 0 with targets on file → AVOID (memo math offers no payable upside)`;
-    } else if (posterior >= BUY_POSTERIOR && ev90dPct != null && ev90dPct > BUY_MIN_EV_PCT && hasHeadroom) {
-      action = "BUY";
-      decisionPath = `no position · posterior ${posterior.toFixed(2)} ≥ ${BUY_POSTERIOR}, EV90d ${ev90dPct.toFixed(1)}% > ${BUY_MIN_EV_PCT}%, headroom ${headroomPct.toFixed(1)}% → BUY`;
-    } else {
-      action = "HOLD";
-      decisionPath = `no position · posterior ${posterior.toFixed(2)} between gates${ev90dPct != null ? `, EV90d ${ev90dPct.toFixed(1)}%` : ", EV unavailable"} → HOLD (watch)`;
-    }
-  } else {
-    if (thesisBroken || posterior < EXIT_POSTERIOR) {
-      action = "EXIT";
-      decisionPath = thesisBroken
-        ? "open position · thesis marked BROKEN → EXIT"
-        : `open position · posterior ${posterior.toFixed(2)} < ${EXIT_POSTERIOR} → EXIT`;
-    } else if (posterior < TRIM_POSTERIOR || (pHitKill != null && pHitKill > TRIM_KILL_PROB) || mandateBreach) {
-      action = "TRIM";
-      decisionPath =
-        posterior < TRIM_POSTERIOR
-          ? `open position · posterior ${posterior.toFixed(2)} < ${TRIM_POSTERIOR} → TRIM`
-          : pHitKill != null && pHitKill > TRIM_KILL_PROB
-            ? `open position · P(hit kill) ${pct(pHitKill)} > ${pct(TRIM_KILL_PROB)} → TRIM`
-            : "open position · mandate breach → TRIM";
-    } else if (posterior >= ADD_POSTERIOR && hasHeadroom && (pHitKill == null || pHitKill < ADD_MAX_KILL_PROB)) {
-      action = "ADD";
-      decisionPath = `open position · posterior ${posterior.toFixed(2)} ≥ ${ADD_POSTERIOR}, headroom ${headroomPct.toFixed(1)}%, P(hit kill) ${pHitKill != null ? pct(pHitKill) : "n/a"} → ADD`;
-    } else if (posterior >= HEDGE_POSTERIOR && regimeStressed && optionsLiquid) {
-      action = "HEDGE";
-      decisionPath = `open position · posterior ${posterior.toFixed(2)} ≥ ${HEDGE_POSTERIOR} but regime stressed and options liquid → HEDGE`;
-    } else {
-      action = "HOLD";
-      decisionPath = `open position · posterior ${posterior.toFixed(2)} inside the hold band → HOLD`;
-    }
-  }
+  const { action, decisionPath } = selectDirectiveAction({
+    hasPosition,
+    dataBroken,
+    posterior,
+    ev90dPct,
+    valuationOnFile,
+    hasHeadroom,
+    headroomPct,
+    thesisBroken,
+    pHitKill,
+    mandateBreach,
+    regimeStressed,
+    optionsLiquid,
+  });
 
   // Collar suggestion when hedging: ~25Δ put funded by a ~25Δ call at the RND expiry.
   let hedgeBlock: DirectiveInputs["hedge"] = null;
