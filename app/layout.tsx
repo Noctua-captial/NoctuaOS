@@ -3,6 +3,7 @@ import { Geist, Cormorant_Garamond, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { Sidebar } from "@/components/sidebar";
 import { CommandBar } from "@/components/command-bar";
+import { authEnabled } from "@/lib/auth";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -38,7 +39,7 @@ export default function RootLayout({
     >
       <body className="noctua-watermark min-h-full">
         <div className="flex min-h-screen">
-          <Sidebar />
+          <Sidebar authEnabled={authEnabled()} />
           <main className="relative z-10 flex-1 overflow-x-hidden">{children}</main>
         </div>
         <CommandBar />

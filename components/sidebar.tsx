@@ -15,8 +15,13 @@ const nav = [
   { href: "/new", code: "09", name: "Athena", desc: "New investigation" },
 ];
 
-export function Sidebar() {
+export function Sidebar({ authEnabled = false }: { authEnabled?: boolean }) {
   const pathname = usePathname();
+
+  async function lock() {
+    await fetch("/api/auth", { method: "DELETE" }).catch(() => {});
+    window.location.href = "/login";
+  }
 
   return (
     <aside className="sticky top-0 z-20 flex h-screen w-60 shrink-0 flex-col border-r border-line bg-ink-raised">
@@ -73,8 +78,21 @@ export function Sidebar() {
       </nav>
 
       <div className="border-t border-line px-6 py-5">
-        <div className="label">Sees in the dark</div>
-        <div className="fin mt-1 text-[10px] text-parchment-faint">v0.1 — internal</div>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="label">Sees in the dark</div>
+            <div className="fin mt-1 text-[10px] text-parchment-faint">v0.1 — internal</div>
+          </div>
+          {authEnabled && (
+            <button
+              onClick={lock}
+              className="label !text-[9px] text-parchment-faint transition-colors hover:text-parchment"
+              title="Sign out — clears the access session"
+            >
+              LOCK ⏻
+            </button>
+          )}
+        </div>
       </div>
     </aside>
   );
