@@ -1,0 +1,6 @@
+{
+  "crons": [
+    { "path": "/api/augury/poll", "schedule": "*/30 * * * *" },
+    { "path": "/api/augury/process", "schedule": "*/5 * * * *" }
+  ]
+}
