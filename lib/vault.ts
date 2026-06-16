@@ -1,5 +1,5 @@
 import { eq, inArray } from "drizzle-orm";
-import { db, tables, sqliteRaw } from "@/db";
+import { db, tables, sql } from "@/db";
 import { createOpenAI } from "@ai-sdk/openai";
 import { embedMany, embed } from "ai";
 
@@ -49,7 +49,7 @@ export async function storeDocument(opts: {
   filedAt?: string | null;
   content: string;
 }): Promise<{ documentId: number; chunkCount: number; embedded: boolean }> {
-  const [doc] = db
+  const [doc] = await db
     .insert(tables.documents)
     .values({
       companyId: opts.companyId ?? null,
@@ -61,23 +61,20 @@ export async function storeDocument(opts: {
       filedAt: opts.filedAt ?? null,
       content: opts.content,
     })
-    .returning()
-    .all();
+    .returning();
 
   const pieces = chunkText(opts.content);
   const embeddings = await tryEmbedMany(pieces);
 
   if (pieces.length > 0) {
-    db.insert(tables.chunks)
-      .values(
-        pieces.map((text, i) => ({
-          documentId: doc.id,
-          idx: i,
-          text,
-          embedding: embeddings[i] ? JSON.stringify(embeddings[i]) : null,
-        })),
-      )
-      .run();
+    await db.insert(tables.chunks).values(
+      pieces.map((text, i) => ({
+        documentId: doc.id,
+        idx: i,
+        text,
+        embedding: embeddings[i] ?? null, // pgvector column maps number[] directly
+      })),
+    );
   }
 
   return { documentId: doc.id, chunkCount: pieces.length, embedded: embeddings[0] != null };
@@ -95,17 +92,6 @@ export type RetrievedChunk = {
   source: string | null;
 };
 
-function ftsQuery(query: string): string {
-  // sanitize into OR-joined terms so raw user text can't break FTS syntax
-  const terms = query
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter((t) => t.length > 2)
-    .slice(0, 12);
-  return terms.map((t) => `"${t}"`).join(" OR ");
-}
-
 export async function searchVault(
   query: string,
   opts: { ticker?: string; limit?: number } = {},
@@ -113,36 +99,37 @@ export async function searchVault(
   const limit = opts.limit ?? 8;
   const results = new Map<number, { score: number }>();
 
-  // 1) FTS keyword search (always available)
-  const q = ftsQuery(query);
-  if (q) {
-    const rows = sqliteRaw
-      .prepare(
-        `SELECT rowid, rank FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?`,
-      )
-      .all(q, limit * 3) as { rowid: number; rank: number }[];
+  // 1) Postgres full-text search (always available — uses the generated `tsv`
+  // tsvector column + GIN index). websearch_to_tsquery safely parses raw user
+  // text, so no hand-rolled sanitization is needed.
+  if (query.trim()) {
+    const rows = await sql<{ id: number; rank: number }[]>`
+      SELECT id, ts_rank(tsv, websearch_to_tsquery('english', ${query})) AS rank
+      FROM chunks
+      WHERE tsv @@ websearch_to_tsquery('english', ${query})
+      ORDER BY rank DESC
+      LIMIT ${limit * 3}
+    `;
     rows.forEach((r, i) => {
-      results.set(r.rowid, { score: 1 - i / (rows.length || 1) });
+      results.set(r.id, { score: 1 - i / (rows.length || 1) });
     });
   }
 
-  // 2) Embedding search when available
+  // 2) Embedding search when available — pgvector cosine distance (`<=>`) with
+  // the HNSW index does the nearest-neighbor scan in Postgres (no loading every
+  // embedding into memory). 1 - distance = cosine similarity.
   const model = embedder();
   if (model) {
     try {
       const { embedding: qVec } = await embed({ model, value: query });
-      const embedded = sqliteRaw
-        .prepare(`SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL`)
-        .all() as { id: number; embedding: string }[];
-      const scored = embedded
-        .map((row) => {
-          const v = JSON.parse(row.embedding) as number[];
-          let dot = 0;
-          for (let i = 0; i < v.length; i++) dot += v[i] * qVec[i];
-          return { id: row.id, sim: dot }; // text-embedding-3 vectors are unit-normalized
-        })
-        .sort((a, b) => b.sim - a.sim)
-        .slice(0, limit * 2);
+      const vec = `[${qVec.join(",")}]`;
+      const scored = await sql<{ id: number; sim: number }[]>`
+        SELECT id, 1 - (embedding <=> ${vec}::vector) AS sim
+        FROM chunks
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> ${vec}::vector
+        LIMIT ${limit * 2}
+      `;
       for (const s of scored) {
         const prev = results.get(s.id)?.score ?? 0;
         results.set(s.id, { score: prev + s.sim });

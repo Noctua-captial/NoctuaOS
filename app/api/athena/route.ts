@@ -34,14 +34,13 @@ export async function POST(req: NextRequest) {
       const emit = (event: Record<string, unknown>) =>
         controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
 
-      const saveRun = (agent: string, output: unknown, inputSummary: string, modelId: string, companyId?: number) => {
-        db.insert(tables.agentRuns)
-          .values({ companyId: companyId ?? null, ticker, agent, model: modelId, inputSummary, output: JSON.stringify(output) })
-          .run();
+      const saveRun = async (agent: string, output: unknown, inputSummary: string, modelId: string, companyId?: number) => {
+        await db.insert(tables.agentRuns)
+          .values({ companyId: companyId ?? null, ticker, agent, model: modelId, inputSummary, output: JSON.stringify(output) });
       };
 
-      const saveTrace = (researcher: string, trace: Trace, companyId?: number) => {
-        db.insert(tables.traces)
+      const saveTrace = async (researcher: string, trace: Trace, companyId?: number) => {
+        await db.insert(tables.traces)
           .values({
             researcher,
             ticker,
@@ -55,8 +54,7 @@ export async function POST(req: NextRequest) {
             confidenceChange: trace.confidenceChange,
             nextAction: trace.nextAction,
             reasoningPattern: trace.reasoningPattern,
-          })
-          .run();
+          });
       };
 
       try {
@@ -88,7 +86,7 @@ export async function POST(req: NextRequest) {
         // ---- Stage 1: Dossier + Thesis ----
         emit({ stage: "dossier", message: `Dossier Agent and Thesis Agent assigned to ${ticker}.` });
         const dossier = await runDossierAgent(dossierM.model, ticker, vaultCtx, notes);
-        saveRun("dossier", dossier, `Investigation opened${notes ? ` — ${notes.slice(0, 80)}` : ""}`, dossierM.modelId);
+        await saveRun("dossier", dossier, `Investigation opened${notes ? ` — ${notes.slice(0, 80)}` : ""}`, dossierM.modelId);
         emit({ stage: "dossier", message: `Bull case formed: “${dossier.bullThesis.oneLiner}”` });
 
         // ---- Stage 1b: Quant snapshot (keyless ground truth) ----
@@ -109,10 +107,10 @@ export async function POST(req: NextRequest) {
           runCatalystAgent(catalystM.model, ticker, dossier, vaultCtx),
           runValuationAgent(valuationM.model, ticker, dossier, vaultCtx),
         ]);
-        saveRun("accounting", accounting, "Financial quality review", accountingM.modelId);
-        saveRun("industry", industry, "Technical & competitive reality check", industryM.modelId);
-        saveRun("catalyst", catalyst, "Re-rating event map", catalystM.modelId);
-        saveRun("valuation", valuation, "Bear/base/bull cases", valuationM.modelId);
+        await saveRun("accounting", accounting, "Financial quality review", accountingM.modelId);
+        await saveRun("industry", industry, "Technical & competitive reality check", industryM.modelId);
+        await saveRun("catalyst", catalyst, "Re-rating event map", catalystM.modelId);
+        await saveRun("valuation", valuation, "Bear/base/bull cases", valuationM.modelId);
         emit({
           stage: "bench",
           message: `Bench reported. Accounting: ${accounting.redFlags.length} red flag(s). Industry: AI exposure ${industry.aiExposureReal ? "real" : "NOT structurally real"}. Catalysts mapped: ${catalyst.catalysts.length}.`,
@@ -142,7 +140,7 @@ export async function POST(req: NextRequest) {
           treeSummary: tree.summary,
           quant,
         });
-        saveRun("logic", logicAudit, "Premise-by-premise logic and science audit", logicModelId);
+        await saveRun("logic", logicAudit, "Premise-by-premise logic and science audit", logicModelId);
         emit({
           stage: "logic",
           message: `Logic verdict: ${logicAudit.verdict.toUpperCase()}. ${logicAudit.nonSequiturs.length} non-sequitur(s). Weakest premise: ${logicAudit.weakestPremise.slice(0, 120)}`,
@@ -151,7 +149,7 @@ export async function POST(req: NextRequest) {
         // ---- Stage 3: Strix ----
         emit({ stage: "strix", message: "Releasing Strix to attack the thesis and the bench's findings." });
         const strix = await runStrix(strixM.model, ticker, dossier, { accounting, industry, catalyst, valuation }, vaultCtx);
-        saveRun("strix", strix, "Adversarial review of full bench", strixM.modelId);
+        await saveRun("strix", strix, "Adversarial review of full bench", strixM.modelId);
         emit({ stage: "strix", message: `Dissent recorded: “${strix.strongestDissent.slice(0, 160)}…”` });
 
         // ---- Stage 4: Evidence Auditor ----
@@ -168,7 +166,7 @@ export async function POST(req: NextRequest) {
           allClaims.map((c) => ({ text: c.text, kind: c.kind, confidence: c.confidence, source: c.source })),
           vaultCtx,
         );
-        saveRun("evidence_auditor", auditor, `Audited ${allClaims.length} claims`, auditorM.modelId);
+        await saveRun("evidence_auditor", auditor, `Audited ${allClaims.length} claims`, auditorM.modelId);
         const flagged = auditor.audits.filter((a) => a.verdict === "unsupported" || a.verdict === "contradicted").length;
         emit({ stage: "audit", message: `Audit complete: ${flagged} of ${auditor.audits.length} claims unsupported or contradicted. Weakest link: ${auditor.weakestLink.slice(0, 120)}` });
 
@@ -217,7 +215,7 @@ export async function POST(req: NextRequest) {
         let companyId: number;
         if (existing) {
           companyId = existing.id;
-          db.update(tables.companies)
+          await db.update(tables.companies)
             .set({
               name: dossier.name,
               sector: dossier.sector,
@@ -227,10 +225,9 @@ export async function POST(req: NextRequest) {
               convictionScore: total,
               updatedAt: new Date(),
             })
-            .where(eq(tables.companies.id, companyId))
-            .run();
+            .where(eq(tables.companies.id, companyId));
         } else {
-          const [created] = db
+          const [created] = await db
             .insert(tables.companies)
             .values({
               ticker,
@@ -245,32 +242,31 @@ export async function POST(req: NextRequest) {
               businessSummary: dossier.businessSummary,
               rejectionReason: synthesis.memo.recommendation === "reject" ? synthesis.memo.finalRecommendation : null,
             })
-            .returning()
-            .all();
+            .returning();
           companyId = created.id;
         }
 
         // Link agent runs, traces, and orphan documents to the company
-        db.update(tables.agentRuns).set({ companyId }).where(eq(tables.agentRuns.ticker, ticker)).run();
-        db.update(tables.documents).set({ companyId }).where(eq(tables.documents.ticker, ticker)).run();
-        db.update(tables.researchQuestions).set({ companyId }).where(eq(tables.researchQuestions.ticker, ticker)).run();
-        db.update(tables.debates).set({ companyId }).where(eq(tables.debates.ticker, ticker)).run();
-        db.update(tables.quantSnapshots).set({ companyId }).where(eq(tables.quantSnapshots.ticker, ticker)).run();
+        await db.update(tables.agentRuns).set({ companyId }).where(eq(tables.agentRuns.ticker, ticker));
+        await db.update(tables.documents).set({ companyId }).where(eq(tables.documents.ticker, ticker));
+        await db.update(tables.researchQuestions).set({ companyId }).where(eq(tables.researchQuestions.ticker, ticker));
+        await db.update(tables.debates).set({ companyId }).where(eq(tables.debates.ticker, ticker));
+        await db.update(tables.quantSnapshots).set({ companyId }).where(eq(tables.quantSnapshots.ticker, ticker));
 
         // Traces from every agent
-        saveTrace("DossierAgent", dossier.trace, companyId);
-        saveTrace("AccountingAgent", accounting.trace, companyId);
-        saveTrace("IndustryAgent", industry.trace, companyId);
-        saveTrace("CatalystAgent", catalyst.trace, companyId);
-        saveTrace("ValuationAgent", valuation.trace, companyId);
-        saveTrace("Strix", strix.trace, companyId);
-        saveTrace("EvidenceAuditor", auditor.trace, companyId);
-        saveTrace("Athena", synthesis.trace, companyId);
-        db.update(tables.traces).set({ companyId }).where(eq(tables.traces.ticker, ticker)).run();
+        await saveTrace("DossierAgent", dossier.trace, companyId);
+        await saveTrace("AccountingAgent", accounting.trace, companyId);
+        await saveTrace("IndustryAgent", industry.trace, companyId);
+        await saveTrace("CatalystAgent", catalyst.trace, companyId);
+        await saveTrace("ValuationAgent", valuation.trace, companyId);
+        await saveTrace("Strix", strix.trace, companyId);
+        await saveTrace("EvidenceAuditor", auditor.trace, companyId);
+        await saveTrace("Athena", synthesis.trace, companyId);
+        await db.update(tables.traces).set({ companyId }).where(eq(tables.traces.ticker, ticker));
 
         // Thesis version
         const priorTheses = await db.select().from(tables.theses).where(eq(tables.theses.companyId, companyId));
-        db.insert(tables.theses)
+        await db.insert(tables.theses)
           .values({
             companyId,
             version: priorTheses.length + 1,
@@ -280,12 +276,11 @@ export async function POST(req: NextRequest) {
             whyNow: dossier.bullThesis.whyNow,
             whatMustHappen: JSON.stringify(dossier.bullThesis.whatMustHappen),
             killCriteria: JSON.stringify(strix.killCriteria),
-          })
-          .run();
+          });
 
         // Claims with auditor adjustments applied
         const auditByText = new Map(auditor.audits.map((a) => [a.claim.toLowerCase().slice(0, 60), a]));
-        db.insert(tables.claims)
+        await db.insert(tables.claims)
           .values(
             allClaims.map((c) => {
               const audit = auditByText.get(c.text.toLowerCase().slice(0, 60));
@@ -299,10 +294,9 @@ export async function POST(req: NextRequest) {
                 sourceType: c.sourceType,
               };
             }),
-          )
-          .run();
+          );
 
-        db.insert(tables.catalysts)
+        await db.insert(tables.catalysts)
           .values(
             catalyst.catalysts.map((c) => ({
               companyId,
@@ -311,10 +305,9 @@ export async function POST(req: NextRequest) {
               expectedDate: c.expectedDate,
               impact: `${c.impact} (p≈${Math.round(c.probability * 100)}%)`,
             })),
-          )
-          .run();
+          );
 
-        db.insert(tables.scores)
+        await db.insert(tables.scores)
           .values({
             companyId,
             total,
@@ -331,11 +324,10 @@ export async function POST(req: NextRequest) {
               liquidityRiskFit: s.liquidityRiskFit,
             }),
             rationale: s.rationale,
-          })
-          .run();
+          });
 
         const priorMemos = await db.select().from(tables.memos).where(eq(tables.memos.companyId, companyId));
-        const [memo] = db
+        const [memo] = await db
           .insert(tables.memos)
           .values({
             companyId,
@@ -386,11 +378,10 @@ export async function POST(req: NextRequest) {
               },
             }),
           })
-          .returning()
-          .all();
+          .returning();
 
-        saveRun("synthesis", synthesis, "IC synthesis", synthesisM.modelId, companyId);
-        db.update(tables.debates).set({ memoId: memo.id }).where(eq(tables.debates.id, debateId)).run();
+        await saveRun("synthesis", synthesis, "IC synthesis", synthesisM.modelId, companyId);
+        await db.update(tables.debates).set({ memoId: memo.id }).where(eq(tables.debates.id, debateId));
 
         emit({
           stage: "done",

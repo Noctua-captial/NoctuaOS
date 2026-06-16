@@ -5,32 +5,30 @@ import { and, desc, eq, isNull } from "drizzle-orm";
 import { db, tables } from "@/db";
 
 export async function resolveAlert(alertId: number) {
-  db.update(tables.alerts).set({ resolved: true }).where(eq(tables.alerts.id, alertId)).run();
+  await db.update(tables.alerts).set({ resolved: true }).where(eq(tables.alerts.id, alertId));
   revalidatePath("/");
 }
 
 export async function updateCompanyStatus(companyId: number, status: string) {
   if (!["pipeline", "watchlist", "active", "rejected", "exited"].includes(status)) return;
-  db.update(tables.companies)
+  await db.update(tables.companies)
     .set({ status, updatedAt: new Date() })
-    .where(eq(tables.companies.id, companyId))
-    .run();
+    .where(eq(tables.companies.id, companyId));
   revalidatePath("/dossiers");
   revalidatePath("/");
 }
 
 export async function updateThesisStatus(companyId: number, thesisStatus: string) {
   if (!["strengthening", "stable", "weakening", "broken"].includes(thesisStatus)) return;
-  db.update(tables.companies)
+  await db.update(tables.companies)
     .set({ thesisStatus, updatedAt: new Date() })
-    .where(eq(tables.companies.id, companyId))
-    .run();
+    .where(eq(tables.companies.id, companyId));
 
   // A broken thesis must surface at the top of The Perch.
   if (thesisStatus === "broken") {
     const company = await db.query.companies.findFirst({ where: eq(tables.companies.id, companyId) });
     if (company) {
-      db.insert(tables.alerts)
+      await db.insert(tables.alerts)
         .values({
           companyId,
           ticker: company.ticker,
@@ -38,8 +36,7 @@ export async function updateThesisStatus(companyId: number, thesisStatus: string
           kind: "thesis_break",
           message: `Thesis marked BROKEN by analyst. Kill criteria review required for ${company.ticker}.`,
           suggestedAction: "Convene IC. Exit per kill criteria or re-underwrite with a new thesis version.",
-        })
-        .run();
+        });
     }
   }
   revalidatePath("/dossiers");
@@ -51,14 +48,13 @@ export async function decideMemo(memoId: number, decision: "approve" | "reject" 
   if (!memo) return;
   const company = await db.query.companies.findFirst({ where: eq(tables.companies.id, memo.companyId) });
 
-  db.update(tables.memos)
+  await db.update(tables.memos)
     .set({ recommendation: decision, decidedBy, decidedAt: new Date() })
-    .where(eq(tables.memos.id, memoId))
-    .run();
+    .where(eq(tables.memos.id, memoId));
 
   const newStatus = decision === "approve" ? "active" : decision === "reject" ? "rejected" : company?.status;
   if (company && newStatus && newStatus !== company.status) {
-    db.update(tables.companies)
+    await db.update(tables.companies)
       .set({
         status: newStatus,
         updatedAt: new Date(),
@@ -67,14 +63,13 @@ export async function decideMemo(memoId: number, decision: "approve" | "reject" 
             ? `Rejected by IC (${decidedBy}, ${new Date().toISOString().slice(0, 10)}) — memo v${memo.version}.`
             : company.rejectionReason,
       })
-      .where(eq(tables.companies.id, company.id))
-      .run();
+      .where(eq(tables.companies.id, company.id));
   }
 
   // Decision becomes part of the record: alert + trace.
   if (company) {
     const verb = decision === "approve" ? "APPROVED" : decision === "reject" ? "REJECTED" : "sent back for MORE WORK";
-    db.insert(tables.alerts)
+    await db.insert(tables.alerts)
       .values({
         companyId: company.id,
         ticker: company.ticker,
@@ -87,9 +82,8 @@ export async function decideMemo(memoId: number, decision: "approve" | "reject" 
             : decision === "reject"
               ? "Rejection reason recorded. Night Vision will watch for the blocker to clear."
               : "Assign next diligence steps from the memo to an analyst.",
-      })
-      .run();
-    db.insert(tables.traces)
+      });
+    await db.insert(tables.traces)
       .values({
         researcher: decidedBy,
         ticker: company.ticker,
@@ -104,8 +98,7 @@ export async function decideMemo(memoId: number, decision: "approve" | "reject" 
         nextAction:
           decision === "approve" ? "Create position file and monitoring checklist" : "Track next diligence steps",
         reasoningPattern: "Every IC decision is logged with who decided and why — outcomes attach later.",
-      })
-      .run();
+      });
   }
 
   revalidatePath(`/ic/${memoId}`);
@@ -137,7 +130,7 @@ export async function openPosition(input: {
   });
 
   const today = new Date().toISOString().slice(0, 10);
-  db.insert(tables.positions)
+  await db.insert(tables.positions)
     .values({
       companyId,
       memoId: memoId ?? null,
@@ -148,17 +141,15 @@ export async function openPosition(input: {
       status: "open",
       killCriteria: thesis?.killCriteria ?? null,
       owner: owner.trim() || "Unassigned",
-    })
-    .run();
+    });
 
   if (company.status !== "active") {
-    db.update(tables.companies)
+    await db.update(tables.companies)
       .set({ status: "active", updatedAt: new Date() })
-      .where(eq(tables.companies.id, companyId))
-      .run();
+      .where(eq(tables.companies.id, companyId));
   }
 
-  db.insert(tables.alerts)
+  await db.insert(tables.alerts)
     .values({
       companyId,
       ticker: company.ticker,
@@ -166,10 +157,9 @@ export async function openPosition(input: {
       kind: "position",
       message: `Position opened: ${company.ticker} ${sizePct.toFixed(1)}% of NAV at $${entryPrice.toFixed(2)} (${owner.trim() || "Unassigned"}).`,
       suggestedAction: "Kill criteria snapshotted at entry. Night Vision monitors from here — review on every alert.",
-    })
-    .run();
+    });
 
-  db.insert(tables.traces)
+  await db.insert(tables.traces)
     .values({
       researcher: owner.trim() || "Unassigned",
       ticker: company.ticker,
@@ -183,8 +173,7 @@ export async function openPosition(input: {
       confidenceChange: 0,
       nextAction: "Monitor kill criteria and catalysts; close requires an After-Action postmortem",
       reasoningPattern: "Entry terms recorded at the moment of commitment — outcome attaches at close.",
-    })
-    .run();
+    });
 
   revalidatePath("/talons");
   revalidatePath(`/dossiers/${company.ticker}`);
@@ -199,13 +188,12 @@ export async function closePosition(positionId: number, exitPrice: number, exitD
   if (!position || position.status === "closed") return;
 
   const date = exitDate?.trim() || new Date().toISOString().slice(0, 10);
-  db.update(tables.positions)
+  await db.update(tables.positions)
     .set({ status: "closed", exitPrice, exitDate: date })
-    .where(eq(tables.positions.id, positionId))
-    .run();
+    .where(eq(tables.positions.id, positionId));
 
   const pnlPct = ((exitPrice - position.entryPrice) / position.entryPrice) * 100;
-  db.insert(tables.alerts)
+  await db.insert(tables.alerts)
     .values({
       companyId: position.companyId,
       ticker: position.ticker,
@@ -213,8 +201,7 @@ export async function closePosition(positionId: number, exitPrice: number, exitD
       kind: "position",
       message: `Position closed: ${position.ticker} at $${exitPrice.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% vs entry). After-Action postmortem required.`,
       suggestedAction: "File the postmortem while the reasoning is fresh. Unexamined exits teach nothing.",
-    })
-    .run();
+    });
 
   revalidatePath("/talons");
   revalidatePath(`/dossiers/${position.ticker}`);
@@ -243,7 +230,7 @@ export async function createPostmortem(formData: FormData) {
     .map((l) => l.trim())
     .filter(Boolean);
 
-  db.insert(tables.postmortems)
+  await db.insert(tables.postmortems)
     .values({
       positionId: Number.isFinite(positionIdRaw) && positionIdRaw > 0 ? positionIdRaw : null,
       companyId,
@@ -255,14 +242,12 @@ export async function createPostmortem(formData: FormData) {
       narrative,
       lessons: JSON.stringify(lessons),
       createdBy: String(formData.get("createdBy") ?? "").trim() || "Unnamed analyst",
-    })
-    .run();
+    });
 
   // Outcome flows back into the ledger: every unresolved trace on this name gets stamped.
-  db.update(tables.traces)
+  await db.update(tables.traces)
     .set({ outcome })
-    .where(and(eq(tables.traces.ticker, company.ticker), isNull(tables.traces.outcome)))
-    .run();
+    .where(and(eq(tables.traces.ticker, company.ticker), isNull(tables.traces.outcome)));
 
   revalidatePath("/talons");
   revalidatePath("/ledger");
@@ -277,9 +262,9 @@ export async function resizePosition(positionId: number, newSizePct: number, act
   if (!position || position.status !== "open") return;
 
   const oldSize = position.sizePct;
-  db.update(tables.positions).set({ sizePct: newSizePct }).where(eq(tables.positions.id, positionId)).run();
+  await db.update(tables.positions).set({ sizePct: newSizePct }).where(eq(tables.positions.id, positionId));
 
-  db.insert(tables.traces)
+  await db.insert(tables.traces)
     .values({
       researcher: actor,
       ticker: position.ticker,
@@ -293,8 +278,7 @@ export async function resizePosition(positionId: number, newSizePct: number, act
       confidenceChange: 0,
       nextAction: "Monitor against kill criteria at the new size",
       reasoningPattern: "Sizing changes are decisions: logged, attributed, and reviewable like any other.",
-    })
-    .run();
+    });
 
   revalidatePath("/war-room");
   revalidatePath("/talons");
@@ -305,12 +289,11 @@ export async function updatePortfolioNav(nav: number, cash: number | null) {
   if (!Number.isFinite(nav) || nav <= 0) return;
   const rows = await db.select().from(tables.portfolio).limit(1);
   if (rows[0]) {
-    db.update(tables.portfolio)
+    await db.update(tables.portfolio)
       .set({ nav, cash, updatedAt: new Date() })
-      .where(eq(tables.portfolio.id, rows[0].id))
-      .run();
+      .where(eq(tables.portfolio.id, rows[0].id));
   } else {
-    db.insert(tables.portfolio).values({ nav, cash }).run();
+    await db.insert(tables.portfolio).values({ nav, cash });
   }
   revalidatePath("/war-room");
   revalidatePath("/talons");
@@ -318,7 +301,7 @@ export async function updatePortfolioNav(nav: number, cash: number | null) {
 
 export async function labelTrace(traceId: number, label: string | null) {
   if (label !== null && !TRACE_LABELS.includes(label)) return;
-  db.update(tables.traces).set({ label }).where(eq(tables.traces.id, traceId)).run();
+  await db.update(tables.traces).set({ label }).where(eq(tables.traces.id, traceId));
   revalidatePath("/ledger");
 }
 
@@ -328,7 +311,7 @@ export async function addClaim(formData: FormData) {
   const source = String(formData.get("source") ?? "").trim();
   if (!companyId || text.length < 10 || source.length < 3) return;
 
-  db.insert(tables.claims)
+  await db.insert(tables.claims)
     .values({
       companyId,
       text,
@@ -337,8 +320,7 @@ export async function addClaim(formData: FormData) {
       confidence: Math.max(0, Math.min(1, Number(formData.get("confidence") ?? 0.5))),
       source,
       sourceType: String(formData.get("sourceType") ?? "analyst_note"),
-    })
-    .run();
+    });
 
   const company = await db.query.companies.findFirst({ where: eq(tables.companies.id, companyId) });
   if (company) revalidatePath(`/dossiers/${company.ticker}`);
