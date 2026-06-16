@@ -13,6 +13,7 @@ const nav = [
   { href: "/ledger", code: "07", name: "Alpha Ledger", desc: "Traces & decisions" },
   { href: "/lab", code: "08", name: "Model Lab", desc: "Agents & routing" },
   { href: "/new", code: "09", name: "Athena", desc: "New investigation" },
+  { href: "/augury", code: "10", name: "Augury", desc: "Trader intelligence" },
 ];
 
 export function Sidebar() {

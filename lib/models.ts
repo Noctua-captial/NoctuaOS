@@ -43,6 +43,8 @@ export const AGENTS = [
   "chat",
   "investigator",
   "logic",
+  "augur_extract",
+  "augur_judge",
   "embeddings",
 ] as const;
 export type Agent = (typeof AGENTS)[number];
@@ -76,6 +78,8 @@ export const ROUTING: Record<Agent, Route[]> = {
   chat: [anthropic(IDS.SONNET), openai(IDS.GPT), xai(IDS.GROK)],
   investigator: [anthropic(IDS.FABLE), openai(IDS.GPT), xai(IDS.GROK)],
   logic: [openai(IDS.GPT_PRO), anthropic(IDS.OPUS), xai(IDS.GROK)],
+  augur_extract: [anthropic(IDS.FABLE), openai(IDS.GPT), xai(IDS.GROK)],
+  augur_judge: [openai(IDS.GPT), anthropic(IDS.FABLE), xai(IDS.GROK)],
   embeddings: [openai(IDS.EMBEDDING)],
 };
 
