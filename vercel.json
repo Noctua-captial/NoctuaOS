@@ -1,5 +1,4 @@
 {
-  "_comment": "Frequent (sub-daily) crons require a Vercel Pro plan; the Hobby plan only allows limited/daily cron invocations. Both cron routes self-guard with CRON_SECRET. vercel.json is strict JSON (no // comments), so this note lives in an unused key.",
   "crons": [
     { "path": "/api/augury/poll", "schedule": "*/30 * * * *" },
     { "path": "/api/augury/process", "schedule": "*/5 * * * *" }
