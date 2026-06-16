@@ -3,6 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { db, tables } from "@/db";
+import { fetchChain } from "@/lib/signals";
+import { getPortfolio } from "@/lib/quant";
+import { getQuote } from "@/lib/market";
+import { blackScholes } from "@/lib/options/bs";
 
 export async function resolveAlert(alertId: number) {
   await db.update(tables.alerts).set({ resolved: true }).where(eq(tables.alerts.id, alertId));
@@ -324,4 +328,219 @@ export async function addClaim(formData: FormData) {
 
   const company = await db.query.companies.findFirst({ where: eq(tables.companies.id, companyId) });
   if (company) revalidatePath(`/dossiers/${company.ticker}`);
+}
+
+// --- Derivatives Desk — option structures -----------------------------------
+
+export type OpenStructureInput = {
+  ticker: string;
+  companyId?: number | null;
+  memoId?: number | null;
+  directiveId?: number | null;
+  strategy: string;
+  direction?: string | null;
+  expiry?: string | null;
+  legs: { right: string; action: string; strike: number; expiry: string; qty: number; mid: number | null }[];
+  netDebit?: number | null;
+  maxLoss?: number | null;
+  maxGain?: number | null;
+  breakevens?: number[];
+  pop?: number | null;
+  evPct?: number | null;
+  greeks?: { delta: number; gamma: number; vega: number; theta: number } | null;
+  entryUnderlying?: number | null;
+  rationale?: string | null;
+  bindingConstraint?: string | null;
+  qty: number;
+  owner: string;
+};
+
+/**
+ * Open an options structure on the paper book. Enriches each leg's entry mark
+ * and greeks from the live chain (Black-Scholes theta), snapshots max loss and
+ * capital-at-risk, and logs the commitment as an alert + trace — the same
+ * discipline as opening an equity position.
+ */
+export async function openOptionStructure(input: OpenStructureInput) {
+  const t = input.ticker?.toUpperCase();
+  if (!t || !Number.isFinite(input.qty) || input.qty <= 0 || !input.legs?.length) return;
+
+  const company = input.companyId
+    ? await db.query.companies.findFirst({ where: eq(tables.companies.id, input.companyId) })
+    : await db.query.companies.findFirst({ where: eq(tables.companies.ticker, t) });
+
+  const [portfolio, chain] = await Promise.all([getPortfolio(), fetchChain(t).catch(() => null)]);
+  const underlying = chain?.spot ?? input.entryUnderlying ?? (await getQuote(t).catch(() => null))?.price ?? null;
+  const asOf = chain?.asOf ?? new Date().toISOString();
+  const refMs = Date.parse(asOf) || Date.now();
+
+  const capitalAtRisk = (input.maxLoss ?? 0) * input.qty;
+  const capitalAtRiskPct = portfolio.nav > 0 ? (capitalAtRisk / portfolio.nav) * 100 : null;
+
+  const [structure] = await db
+    .insert(tables.optionStructures)
+    .values({
+      companyId: company?.id ?? null,
+      ticker: t,
+      memoId: input.memoId ?? null,
+      directiveId: input.directiveId ?? null,
+      strategy: input.strategy,
+      direction: input.direction ?? null,
+      status: "open",
+      qty: input.qty,
+      netDebit: input.netDebit ?? null,
+      maxLoss: input.maxLoss ?? null,
+      maxGain: input.maxGain ?? null,
+      breakevens: JSON.stringify(input.breakevens ?? []),
+      pop: input.pop ?? null,
+      evPct: input.evPct ?? null,
+      capitalAtRiskPct,
+      entryGreeks: input.greeks ? JSON.stringify(input.greeks) : null,
+      entryUnderlying: underlying,
+      expiry: input.expiry ?? null,
+      rationale: input.rationale ?? null,
+      bindingConstraint: input.bindingConstraint ?? null,
+      createdBy: input.owner.trim() || "Unassigned",
+    })
+    .returning();
+
+  for (const leg of input.legs) {
+    const right = leg.right === "P" ? "P" : "C";
+    const found =
+      chain?.contracts.find((c) => c.type === right && c.strike === leg.strike && c.expiry === leg.expiry) ?? null;
+    const years = Math.max((Date.parse(`${leg.expiry.slice(0, 10)}T21:00:00Z`) - refMs) / (365 * 86_400_000), 1 / 365);
+    const iv = found?.iv ?? null;
+    const bs = iv != null && iv > 0 && underlying != null ? blackScholes(right, underlying, leg.strike, iv, years) : null;
+    await db.insert(tables.optionLegs).values({
+      structureId: structure.id,
+      right,
+      action: leg.action === "short" ? "short" : "long",
+      strike: leg.strike,
+      expiry: leg.expiry,
+      qty: leg.qty,
+      entryMid: leg.mid ?? found?.mid ?? null,
+      entryIv: iv,
+      entryDelta: found?.delta ?? bs?.delta ?? null,
+      entryGamma: found?.gamma ?? bs?.gamma ?? null,
+      entryVega: found?.vega ?? bs?.vega ?? null,
+      entryTheta: bs?.theta ?? null,
+    });
+  }
+
+  await db.insert(tables.alerts).values({
+    companyId: company?.id ?? null,
+    ticker: t,
+    severity: 2,
+    kind: "position",
+    message: `Options structure opened: ${input.qty}× ${input.strategy.replace(/_/g, " ")} on ${t} — max loss $${Math.round(capitalAtRisk).toLocaleString()} (${(capitalAtRiskPct ?? 0).toFixed(1)}% of NAV).`,
+    suggestedAction: "Night Vision monitors DTE, breakeven, assignment, and vega from here. Close requires an After-Action review.",
+  });
+
+  await db.insert(tables.traces).values({
+    researcher: input.owner.trim() || "Unassigned",
+    ticker: t,
+    companyId: company?.id ?? null,
+    currentQuestion: `How should Noctua express the ${t} thesis in the options market?`,
+    actionTaken: `Opened ${input.qty}× ${input.strategy.replace(/_/g, " ")} (${input.direction ?? "—"}), defined risk $${Math.round(capitalAtRisk).toLocaleString()}`,
+    sourceType: "options_structure",
+    informationSeen: `${input.legs.length} legs, expiry ${input.expiry ?? "—"}, POP ${input.pop != null ? `${Math.round(input.pop * 100)}%` : "n/a"}, binding ${input.bindingConstraint ?? "—"}`,
+    interpretation: input.rationale ?? "Defined-risk options expression of the equity thesis.",
+    signalCategory: input.direction === "bearish" ? "thesis_contradiction" : "thesis_support",
+    confidenceChange: 0,
+    nextAction: "Manage to plan: roll/close at the DTE or profit target; review on any Night Vision alert.",
+    reasoningPattern: "The options branch expresses the same edge at defined risk — sized by premium and vega budget, not share count.",
+  });
+
+  revalidatePath("/desk");
+  revalidatePath("/war-room");
+  revalidatePath("/");
+  if (company) revalidatePath(`/dossiers/${t}`);
+}
+
+export async function closeOptionStructure(structureId: number, exitNetValuePerLot: number, exitUnderlying?: number | null) {
+  if (!Number.isFinite(exitNetValuePerLot)) return;
+  const s = await db.query.optionStructures.findFirst({ where: eq(tables.optionStructures.id, structureId) });
+  if (!s || s.status === "closed") return;
+
+  const realizedPnl = (exitNetValuePerLot - (s.netDebit ?? 0)) * s.qty;
+  await db
+    .update(tables.optionStructures)
+    .set({
+      status: "closed",
+      exitNetValue: exitNetValuePerLot,
+      exitUnderlying: exitUnderlying ?? null,
+      realizedPnl,
+      closedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(tables.optionStructures.id, structureId));
+
+  await db.insert(tables.alerts).values({
+    companyId: s.companyId,
+    ticker: s.ticker,
+    severity: 2,
+    kind: "position",
+    message: `Options structure closed: ${s.qty}× ${s.strategy.replace(/_/g, " ")} on ${s.ticker} — realized ${realizedPnl >= 0 ? "+" : ""}$${Math.round(realizedPnl).toLocaleString()}. After-Action review required.`,
+    suggestedAction: "File the options postmortem: was the vol view right, did theta behave, would another structure have paid more.",
+  });
+
+  revalidatePath("/desk");
+  revalidatePath("/war-room");
+  revalidatePath("/");
+}
+
+const OPT_PM_OUTCOMES = ["win", "loss", "scratch"];
+const OPT_PM_RIGHT = ["right", "wrong", "mixed"];
+
+export async function createOptionPostmortem(formData: FormData) {
+  const structureId = Number(formData.get("structureId"));
+  const outcome = String(formData.get("outcome") ?? "");
+  const volViewRight = String(formData.get("volViewRight") ?? "");
+  const directionRight = String(formData.get("directionRight") ?? "");
+  const narrative = String(formData.get("narrative") ?? "").trim();
+  if (
+    !Number.isFinite(structureId) ||
+    !OPT_PM_OUTCOMES.includes(outcome) ||
+    !OPT_PM_RIGHT.includes(volViewRight) ||
+    !OPT_PM_RIGHT.includes(directionRight) ||
+    narrative.length < 10
+  )
+    return;
+
+  const structure = await db.query.optionStructures.findFirst({ where: eq(tables.optionStructures.id, structureId) });
+  if (!structure) return;
+
+  const lessons = String(formData.get("lessons") ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  await db.insert(tables.optionPostmortems).values({
+    structureId,
+    companyId: structure.companyId,
+    ticker: structure.ticker,
+    outcome,
+    volViewRight,
+    directionRight,
+    structureChoiceRight: formData.get("structureChoiceRight") === "true",
+    thetaCapture: String(formData.get("thetaCapture") ?? "").trim() || null,
+    narrative,
+    lessons: JSON.stringify(lessons),
+    createdBy: String(formData.get("createdBy") ?? "").trim() || "Unnamed analyst",
+  });
+
+  // Stamp the options decision traces for this name with the realized outcome.
+  await db
+    .update(tables.traces)
+    .set({ outcome })
+    .where(
+      and(
+        eq(tables.traces.ticker, structure.ticker),
+        eq(tables.traces.sourceType, "options_structure"),
+        isNull(tables.traces.outcome),
+      ),
+    );
+
+  revalidatePath("/desk");
+  revalidatePath("/ledger");
 }

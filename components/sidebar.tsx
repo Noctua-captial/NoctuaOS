@@ -9,11 +9,12 @@ const nav = [
   { href: "/vault", code: "03", name: "The Vault", desc: "Evidence & documents" },
   { href: "/ic", code: "04", name: "IC Chamber", desc: "Investment memos" },
   { href: "/talons", code: "05", name: "Talons", desc: "Active positions" },
-  { href: "/war-room", code: "06", name: "War Room", desc: "Regime & navigation" },
-  { href: "/ledger", code: "07", name: "Alpha Ledger", desc: "Traces & decisions" },
-  { href: "/lab", code: "08", name: "Model Lab", desc: "Agents & routing" },
-  { href: "/new", code: "09", name: "Athena", desc: "New investigation" },
-  { href: "/augury", code: "10", name: "Augury", desc: "Trader intelligence" },
+  { href: "/desk", code: "06", name: "Derivatives Desk", desc: "Options book & greeks" },
+  { href: "/war-room", code: "07", name: "War Room", desc: "Regime & navigation" },
+  { href: "/ledger", code: "08", name: "Alpha Ledger", desc: "Traces & decisions" },
+  { href: "/lab", code: "09", name: "Model Lab", desc: "Agents & routing" },
+  { href: "/new", code: "10", name: "Athena", desc: "New investigation" },
+  { href: "/augury", code: "11", name: "Augury", desc: "Trader intelligence" },
 ];
 
 export function Sidebar() {

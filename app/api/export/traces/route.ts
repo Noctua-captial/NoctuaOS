@@ -6,13 +6,18 @@ import { db, tables } from "@/db";
 // and directives (labeled outcomes accrue as positions resolve).
 // This file is the fine-tuning dataset.
 export async function GET() {
-  const [traces, debates, turns, briefs, directives] = await Promise.all([
-    db.select().from(tables.traces).orderBy(asc(tables.traces.id)),
-    db.select().from(tables.debates).orderBy(asc(tables.debates.id)),
-    db.select().from(tables.debateTurns).orderBy(asc(tables.debateTurns.idx)),
-    db.select().from(tables.councilBriefs).orderBy(asc(tables.councilBriefs.id)),
-    db.select().from(tables.directives).orderBy(asc(tables.directives.id)),
-  ]);
+  const [traces, debates, turns, briefs, directives, structures, optPostmortems, optBacktests, optScorecards] =
+    await Promise.all([
+      db.select().from(tables.traces).orderBy(asc(tables.traces.id)),
+      db.select().from(tables.debates).orderBy(asc(tables.debates.id)),
+      db.select().from(tables.debateTurns).orderBy(asc(tables.debateTurns.idx)),
+      db.select().from(tables.councilBriefs).orderBy(asc(tables.councilBriefs.id)),
+      db.select().from(tables.directives).orderBy(asc(tables.directives.id)),
+      db.select().from(tables.optionStructures).orderBy(asc(tables.optionStructures.id)),
+      db.select().from(tables.optionPostmortems).orderBy(asc(tables.optionPostmortems.id)),
+      db.select().from(tables.optionBacktests).orderBy(asc(tables.optionBacktests.id)),
+      db.select().from(tables.optionScorecards).orderBy(asc(tables.optionScorecards.id)),
+    ]);
 
   const turnsByDebate = new Map<number, typeof turns>();
   for (const t of turns) {
@@ -45,6 +50,22 @@ export async function GET() {
         inputs: safeParse(d.inputs),
       }),
     ),
+    // Options branch: structures (the chosen expression), their postmortems
+    // (vol-view / direction / structure-choice graded), backtests (overlay
+    // alpha vs stock-only), and the structure-by-regime scorecards.
+    ...structures.map((s) =>
+      JSON.stringify({
+        type: "option_structure",
+        ...s,
+        breakevens: safeParse(s.breakevens ?? "[]"),
+        entryGreeks: safeParse(s.entryGreeks ?? "null"),
+      }),
+    ),
+    ...optPostmortems.map((p) =>
+      JSON.stringify({ type: "option_postmortem", ...p, lessons: safeParse(p.lessons ?? "[]") }),
+    ),
+    ...optBacktests.map((b) => JSON.stringify({ type: "option_backtest", ...b })),
+    ...optScorecards.map((s) => JSON.stringify({ type: "option_scorecard", ...s, data: safeParse(s.data ?? "null") })),
   ];
 
   return new Response(lines.join("\n") + (lines.length > 0 ? "\n" : ""), {

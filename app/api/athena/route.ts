@@ -16,6 +16,9 @@ import { modelFor } from "@/lib/models";
 import { vaultContext } from "@/lib/vault";
 import { computeNameQuant, type NameQuant } from "@/lib/quant";
 import { runResearchTree, runLogicAuditor, runDebate } from "@/lib/symposium";
+import { structureThesis } from "@/lib/options/strategist";
+import { fetchChain } from "@/lib/signals";
+import { getQuote } from "@/lib/market";
 
 export const maxDuration = 600;
 
@@ -326,6 +329,70 @@ export async function POST(req: NextRequest) {
             rationale: s.rationale,
           });
 
+        // ---- Expression: the defined-risk options structure for this thesis ----
+        // The debate's P(bull) IS the posterior; feed it + the valuation cases +
+        // the live chain into the strategist. Best-effort and deterministic; a
+        // dark chain simply leaves the memo without an expression section.
+        let expression: Record<string, unknown> | null = null;
+        try {
+          const parsePrice = (str: string | undefined | null): number | null => {
+            if (typeof str !== "string") return null;
+            const m = str.match(/\$\s*(\d+(?:[,.]\d+)?)/);
+            if (!m) return null;
+            const v = Number(m[1].replace(",", ""));
+            return Number.isFinite(v) && v > 0 ? v : null;
+          };
+          const [exprQuote, exprChain] = await Promise.all([
+            getQuote(ticker).catch(() => null),
+            fetchChain(ticker).catch(() => null),
+          ]);
+          if (exprQuote && exprChain && exprQuote.price > 0) {
+            const nextCat =
+              catalyst.catalysts
+                .map((c) => c.expectedDate)
+                .filter((d): d is string => typeof d === "string" && /^\d{4}-\d{2}-\d{2}/.test(d))
+                .sort()[0] ?? null;
+            const cands = await structureThesis({
+              ticker,
+              chain: exprChain,
+              posterior: verdict.probabilityBullCaseWorks,
+              spot: exprQuote.price,
+              catalystDate: nextCat,
+              memo: {
+                bear: parsePrice(valuation.bear.value),
+                base: parsePrice(valuation.base.value),
+                bull: parsePrice(valuation.bull.value),
+              },
+              history: exprQuote.history,
+              forecastVol: quant?.annualizedVol ?? null,
+              maxCandidates: 3,
+            });
+            const best = cands[0];
+            if (best) {
+              expression = {
+                strategy: best.strategy,
+                label: best.label,
+                direction: best.direction,
+                expiry: best.expiry,
+                dte: Math.round(best.dte),
+                legs: best.legs.map((l) => ({ right: l.right, action: l.action, strike: l.strike, expiry: l.expiry, qty: l.qty, mid: l.mid })),
+                netDebit: best.netDebit,
+                maxLoss: best.maxLoss,
+                maxGain: best.maxGain,
+                breakevens: best.breakevens,
+                pop: best.pop,
+                evPctOnRisk: best.evPctOnRisk,
+                greeks: best.greeks,
+                entryUnderlying: exprQuote.price,
+                rationale: best.rationale,
+                alternatives: cands.slice(1).map((c) => ({ label: c.label, strategy: c.strategy, pop: c.pop, evPctOnRisk: c.evPctOnRisk, maxLoss: c.maxLoss })),
+              };
+            }
+          }
+        } catch {
+          // expression is optional — the memo persists without it
+        }
+
         const priorMemos = await db.select().from(tables.memos).where(eq(tables.memos.companyId, companyId));
         const [memo] = await db
           .insert(tables.memos)
@@ -365,6 +432,7 @@ export async function POST(req: NextRequest) {
               dissent: `Strix: “${strix.strongestDissent}”`,
               finalRecommendation: synthesis.memo.finalRecommendation,
               nextDiligenceSteps: synthesis.nextDiligenceSteps,
+              expression,
               symposium: {
                 debateId,
                 verdict: verdict.verdict,

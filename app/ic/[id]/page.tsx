@@ -3,9 +3,31 @@ import { notFound } from "next/navigation";
 import { eq } from "drizzle-orm";
 import { db, tables } from "@/db";
 import { MemoDecision } from "@/components/memo-decision";
+import { OpenStructure } from "@/components/desk-ui";
 import { getQuote } from "@/lib/market";
+import { getPortfolio } from "@/lib/quant";
+import { optionSizing } from "@/lib/options/sizing";
 
 export const dynamic = "force-dynamic";
+
+type ExpressionContent = {
+  strategy: string;
+  label?: string;
+  direction: string | null;
+  expiry: string | null;
+  dte?: number;
+  legs: { right: string; action: string; strike: number; expiry: string; qty: number; mid: number | null }[];
+  netDebit: number | null;
+  maxLoss: number | null;
+  maxGain: number | null;
+  breakevens: number[];
+  pop: number | null;
+  evPctOnRisk: number | null;
+  greeks: { delta: number; gamma: number; vega: number; theta: number } | null;
+  entryUnderlying: number | null;
+  rationale: string;
+  alternatives?: { label: string; strategy: string; pop: number | null; evPctOnRisk: number | null; maxLoss: number }[];
+};
 
 type EvidenceRow = {
   claim: string;
@@ -31,6 +53,7 @@ type MemoContent = {
   dissent?: string;
   finalRecommendation?: string;
   nextDiligenceSteps?: string[];
+  expression?: ExpressionContent | null;
   symposium?: {
     debateId?: number;
     verdict?: string;
@@ -80,6 +103,23 @@ export default async function MemoPage({ params }: { params: Promise<{ id: strin
     content = JSON.parse(memo.content);
   } catch {}
 
+  // Suggested lot count for the options expression, if one is on file. Sized
+  // against NAV + per-trade/Kelly caps; the desk re-checks the live book budgets.
+  const expr = content.expression;
+  let exprQty = 0;
+  if (expr && expr.maxLoss != null && expr.maxLoss > 0) {
+    const portfolio = await getPortfolio();
+    const evRealPerLot = expr.evPctOnRisk != null ? (expr.evPctOnRisk / 100) * expr.maxLoss : null;
+    exprQty = optionSizing({
+      maxLoss: expr.maxLoss,
+      maxGain: expr.maxGain,
+      pop: expr.pop,
+      evRealPerLot,
+      vegaPerLot: expr.greeks?.vega ?? null,
+      navUsd: portfolio.nav,
+    }).qty;
+  }
+
   return (
     <div className="px-10 py-8">
       <div className="mb-5 flex items-center justify-between">
@@ -102,6 +142,48 @@ export default async function MemoPage({ params }: { params: Promise<{ id: strin
         proposedSize={memo.proposedSize}
         hasPosition={Boolean(existingPosition)}
       />
+
+      {expr && expr.maxLoss != null && expr.maxLoss > 0 && (
+        <div className="mb-5 flex items-center justify-between border border-line bg-ink-card px-5 py-4">
+          <div>
+            <div className="label !text-[8.5px]">Express via options — defined risk</div>
+            <div className="mt-1 text-[13px] text-parchment">
+              {expr.label ?? expr.strategy.replace(/_/g, " ")}{" "}
+              <span className="fin text-[11px] text-parchment-faint">
+                {expr.legs.map((l) => `${l.action === "long" ? "+" : "−"}${l.qty}${l.right}${l.strike}`).join("  ")}
+              </span>
+            </div>
+            <div className="fin mt-1 text-[11px] text-parchment-dim">
+              max loss ${expr.maxLoss.toLocaleString()}/lot · POP {expr.pop != null ? `${Math.round(expr.pop * 100)}%` : "—"} ·
+              EV/risk {expr.evPctOnRisk != null ? `${expr.evPctOnRisk >= 0 ? "+" : ""}${expr.evPctOnRisk.toFixed(0)}%` : "—"} ·
+              suggested {exprQty}×
+            </div>
+          </div>
+          <OpenStructure
+            structure={{
+              ticker: company.ticker,
+              companyId: company.id,
+              memoId: memo.id,
+              directiveId: null,
+              strategy: expr.strategy,
+              direction: expr.direction,
+              expiry: expr.expiry,
+              legs: expr.legs,
+              netDebit: expr.netDebit,
+              maxLoss: expr.maxLoss,
+              maxGain: expr.maxGain,
+              breakevens: expr.breakevens,
+              pop: expr.pop,
+              evPct: expr.evPctOnRisk,
+              greeks: expr.greeks,
+              entryUnderlying: expr.entryUnderlying,
+              rationale: expr.rationale,
+              bindingConstraint: null,
+            }}
+            suggestedQty={exprQty}
+          />
+        </div>
+      )}
 
       <article className="parchment-doc mx-auto max-w-3xl px-12 py-12">
         <header className="mb-9 border-b border-[#211d14]/20 pb-7 text-center">
@@ -246,8 +328,52 @@ export default async function MemoPage({ params }: { params: Promise<{ id: strin
           </Section>
         )}
 
+        {expr && (
+          <Section n={16} title="Expression — Defined-Risk Options">
+            <div className="fin space-y-1.5 text-[12px]">
+              <p>
+                <span className="inline-block w-32 font-semibold">STRUCTURE</span>
+                {(expr.label ?? expr.strategy.replace(/_/g, " "))} ({expr.direction ?? "—"})
+              </p>
+              <p>
+                <span className="inline-block w-32 font-semibold">LEGS</span>
+                {expr.legs
+                  .map((l) => `${l.action === "long" ? "long" : "short"} ${l.qty} ${l.right}${l.strike} ${l.expiry.slice(5)}`)
+                  .join("; ")}
+              </p>
+              <p>
+                <span className="inline-block w-32 font-semibold">MAX LOSS / GAIN</span>
+                ${expr.maxLoss?.toLocaleString() ?? "—"} / {expr.maxGain != null ? `$${expr.maxGain.toLocaleString()}` : "unbounded"} per lot
+              </p>
+              <p>
+                <span className="inline-block w-32 font-semibold">POP / EV·RISK</span>
+                {expr.pop != null ? `${Math.round(expr.pop * 100)}%` : "—"} /{" "}
+                {expr.evPctOnRisk != null ? `${expr.evPctOnRisk >= 0 ? "+" : ""}${expr.evPctOnRisk.toFixed(0)}%` : "—"}
+              </p>
+              {expr.breakevens.length > 0 && (
+                <p>
+                  <span className="inline-block w-32 font-semibold">BREAKEVENS</span>
+                  {expr.breakevens.map((b) => `$${b}`).join(" / ")}
+                </p>
+              )}
+            </div>
+            <p className="mt-3 border-l-2 border-[#211d14]/40 pl-4">{expr.rationale}</p>
+            {expr.alternatives && expr.alternatives.length > 0 && (
+              <p className="fin mt-2 text-[11px] opacity-70">
+                Alternatives considered:{" "}
+                {expr.alternatives
+                  .map(
+                    (a) =>
+                      `${a.label} (POP ${a.pop != null ? `${Math.round(a.pop * 100)}%` : "—"}, EV ${a.evPctOnRisk != null ? `${a.evPctOnRisk.toFixed(0)}%` : "—"})`,
+                  )
+                  .join("; ")}
+              </p>
+            )}
+          </Section>
+        )}
+
         {content.symposium?.verdict && (
-          <Section n={16} title="The Symposium — Debate Record">
+          <Section n={17} title="The Symposium — Debate Record">
             <div className="fin space-y-1.5 text-[12px]">
               <p>
                 <span className="inline-block w-32 font-semibold">VERDICT</span>

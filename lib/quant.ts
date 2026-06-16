@@ -36,6 +36,28 @@ export const MANDATE: Mandate = {
   volTargetAnnual: envNum("NOCTUA_MANDATE_VOL_TARGET_ANNUAL", 0.15),
 };
 
+// --- Options mandate (the derivatives branch) -------------------------------
+// The equity Mandate sizes by % of NAV in shares; the options book needs its
+// own limits in the currency that actually constrains a derivatives desk:
+// premium (max loss) at risk, net vega, net beta-weighted delta, and a gamma
+// guard near expiry. Env-overridable exactly like MANDATE.
+
+export type OptionsMandate = {
+  maxPremiumAtRiskPctPerTrade: number; // worst-case loss of one structure, % of NAV
+  maxPremiumAtRiskPctBook: number; // aggregate worst-case loss across the options book, % of NAV
+  maxBookVegaPctPerVolPt: number; // |book vega $| / NAV, % per 1 vol point
+  maxNetDeltaPctNav: number; // |net beta-weighted delta notional| / NAV, %
+  gammaNearExpiryDte: number; // a short-gamma structure inside this many DTE trips a warning
+};
+
+export const OPTIONS_MANDATE: OptionsMandate = {
+  maxPremiumAtRiskPctPerTrade: envNum("NOCTUA_OPT_MAX_PREMIUM_PCT_TRADE", 1.5),
+  maxPremiumAtRiskPctBook: envNum("NOCTUA_OPT_MAX_PREMIUM_PCT_BOOK", 8),
+  maxBookVegaPctPerVolPt: envNum("NOCTUA_OPT_MAX_BOOK_VEGA_PCT", 0.5),
+  maxNetDeltaPctNav: envNum("NOCTUA_OPT_MAX_NET_DELTA_PCT", 30),
+  gammaNearExpiryDte: envNum("NOCTUA_OPT_GAMMA_NEAR_EXPIRY_DTE", 7),
+};
+
 // --- Math primitives --------------------------------------------------------
 
 function dailyReturns(closes: number[]): number[] {

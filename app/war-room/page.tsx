@@ -3,6 +3,8 @@ import { desc, eq, inArray } from "drizzle-orm";
 import { db, tables } from "@/db";
 import { computeRegime, checkMandate, latestBrief } from "@/lib/warroom";
 import { computeBookQuant, getPortfolio, MANDATE } from "@/lib/quant";
+import { computeOptionsBook } from "@/lib/options/book";
+import { checkOptionsMandate } from "@/lib/options/sizing";
 import { getQuotes } from "@/lib/market";
 import { parseDirectiveRow, type Directive } from "@/lib/oracle";
 import { ThesisStatus, TickerLink } from "@/components/ui";
@@ -14,8 +16,17 @@ function pct(v: number | null | undefined, digits = 1): string {
   return v != null ? `${v.toFixed(digits)}%` : "—";
 }
 
+function usd(v: number | null | undefined): string {
+  if (v == null) return "—";
+  const a = Math.abs(v);
+  const sign = v < 0 ? "−" : "";
+  if (a >= 1e6) return `${sign}$${(a / 1e6).toFixed(2)}M`;
+  if (a >= 1e3) return `${sign}$${(a / 1e3).toFixed(1)}K`;
+  return `${sign}$${a.toFixed(0)}`;
+}
+
 export default async function WarRoom() {
-  const [regime, book, portfolio, brief, openRows] = await Promise.all([
+  const [regime, book, portfolio, brief, openRows, optionsBook] = await Promise.all([
     computeRegime().catch(() => null),
     computeBookQuant().catch(() => null),
     getPortfolio(),
@@ -25,9 +36,19 @@ export default async function WarRoom() {
       .from(tables.positions)
       .innerJoin(tables.companies, eq(tables.positions.companyId, tables.companies.id))
       .where(eq(tables.positions.status, "open")),
+    computeOptionsBook().catch(() => null),
   ]);
 
   const violations = book ? checkMandate(book) : [];
+  const optionFlags = optionsBook
+    ? checkOptionsMandate({
+        navUsd: optionsBook.navUsd,
+        premiumAtRiskPct: optionsBook.premiumAtRiskPct,
+        bookVegaUsd: optionsBook.greeks.vegaUsd,
+        netDeltaUsd: optionsBook.greeks.betaWeightedDeltaUsd,
+        shortGammaNearExpiry: optionsBook.shortGammaNearExpiry,
+      })
+    : [];
   const quoteMap = await getQuotes(openRows.map((r) => r.position.ticker)).catch(() => new Map());
 
   const positionByTicker = new Map(
@@ -325,6 +346,55 @@ export default async function WarRoom() {
                     <span className="fin text-[11px] text-warn">ρ {c.corr.toFixed(2)}</span>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {optionsBook && (
+            <div>
+              <div className="mb-3 flex items-baseline justify-between">
+                <span className="label">Options Book — greeks & premium</span>
+                <Link href="/desk" className="label hover:text-parchment-dim">
+                  Desk →
+                </Link>
+              </div>
+              <div className="card px-5 py-4">
+                <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+                  <div>
+                    <div className="fin text-lg leading-none text-parchment">{optionsBook.premiumAtRiskPct.toFixed(1)}%</div>
+                    <div className="label mt-1 !text-[8px]">Premium at risk · {usd(optionsBook.premiumAtRiskUsd)}</div>
+                  </div>
+                  <div>
+                    <div className="fin text-lg leading-none text-parchment">{usd(optionsBook.greeks.betaWeightedDeltaUsd)}</div>
+                    <div className="label mt-1 !text-[8px]">β-weighted net Δ</div>
+                  </div>
+                  <div>
+                    <div className={`fin text-lg leading-none ${optionsBook.greeks.vegaUsd >= 0 ? "text-parchment" : "text-warn"}`}>
+                      {usd(optionsBook.greeks.vegaUsd)}
+                    </div>
+                    <div className="label mt-1 !text-[8px]">Net vega / vol pt</div>
+                  </div>
+                  <div>
+                    <div className={`fin text-lg leading-none ${optionsBook.greeks.thetaUsd >= 0 ? "text-bull" : "text-bear"}`}>
+                      {usd(optionsBook.greeks.thetaUsd)}
+                    </div>
+                    <div className="label mt-1 !text-[8px]">Net theta / day</div>
+                  </div>
+                </div>
+                {optionFlags.length > 0 && (
+                  <div className="card-rule mt-3 space-y-1.5 pt-3">
+                    {optionFlags.map((f, i) => (
+                      <p key={i} className={`text-[11px] leading-relaxed ${f.severity === "violation" ? "text-bear" : "text-warn"}`}>
+                        <span className="font-semibold">{f.rule}.</span> {f.detail}
+                      </p>
+                    ))}
+                  </div>
+                )}
+                {optionsBook.open.length === 0 && (
+                  <p className="card-rule mt-3 pt-3 text-[11px] text-parchment-faint">
+                    No open structures. The desk expresses theses at defined risk — sized by premium and vega budget.
+                  </p>
+                )}
               </div>
             </div>
           )}

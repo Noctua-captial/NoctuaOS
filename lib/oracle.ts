@@ -36,6 +36,7 @@ import {
   type NameQuant,
 } from "@/lib/quant";
 import { modelFor } from "@/lib/models";
+import { structureThesis, protectiveCollar } from "@/lib/options/strategist";
 
 // --- Decision thresholds (documented, deterministic) --------------------------
 // No position:   BUY    posterior ≥ 0.62 AND risk-adj EV90d > 8% AND mandate headroom
@@ -154,6 +155,23 @@ export type DirectiveInputs = {
   ev: { rawPct: number; cvarPenaltyPct: number; riskAdjustedPct: number; baseReturnPct: number; bearReturnPct: number } | null;
   sizing: { method: "multi" | "single"; recommendedPct: number; bindingConstraint: string } | null;
   hedge: { expiry: string; putStrike: number; callStrike: number; netCostPerShare: number | null } | null;
+  optionsStructure: {
+    strategy: string;
+    label: string;
+    direction: string;
+    expiry: string;
+    dte: number;
+    legs: { right: string; action: string; strike: number; expiry: string; qty: number; mid: number | null }[];
+    netDebit: number; // $/lot, + debit / − credit
+    maxLoss: number; // $/lot
+    maxGain: number | null; // $/lot, null = unbounded
+    breakevens: number[];
+    pop: number | null;
+    evPctOnRisk: number | null;
+    greeks: { delta: number; gamma: number; vega: number; theta: number } | null;
+    rationale: string;
+    alternatives: { label: string; strategy: string; pop: number | null; evPctOnRisk: number | null; maxLoss: number }[];
+  } | null;
   catalyst: { title: string; date: string; daysOut: number } | null;
   position: { sizePct: number; entryPrice: number; pnlPct: number | null } | null;
   mandate: { maxPositionPct: number; headroomPct: number; grossExposurePct: number | null };
@@ -633,23 +651,56 @@ export async function computeDirective(ticker: string): Promise<Directive> {
     }
   }
 
-  // Collar suggestion when hedging: ~25Δ put funded by a ~25Δ call at the RND expiry.
+  // Collar suggestion when hedging: ~25Δ put funded by a ~25Δ call at the RND
+  // expiry. The structuring logic lives in the strategist so HEDGE and the
+  // standalone options catalog share one source of truth.
   let hedgeBlock: DirectiveInputs["hedge"] = null;
   if (action === "HEDGE" && chain && rndBlock) {
-    const atExpiry = chain.contracts.filter((c) => c.expiry === rndBlock!.expiry && c.delta != null);
-    const nearDelta = (type: "C" | "P") =>
-      atExpiry
-        .filter((c) => c.type === type)
-        .sort((a, b) => Math.abs(Math.abs(a.delta!) - 0.25) - Math.abs(Math.abs(b.delta!) - 0.25))[0] ?? null;
-    const put = nearDelta("P");
-    const call = nearDelta("C");
-    if (put && call) {
-      hedgeBlock = {
-        expiry: rndBlock.expiry,
-        putStrike: put.strike,
-        callStrike: call.strike,
-        netCostPerShare: put.mid != null && call.mid != null ? put.mid - call.mid : null,
-      };
+    hedgeBlock = protectiveCollar(chain, rndBlock.expiry);
+  }
+
+  // Options expression: the best defined-risk structure for this directive's
+  // posterior, built from the same chain (direction + vol surface + RND). This
+  // is what makes the OS dual-output — the equity verdict above AND how to
+  // express it in the options market. Deterministic; degrades to null.
+  let optionsStructureBlock: DirectiveInputs["optionsStructure"] = null;
+  if (chain && spot != null && spot > 0) {
+    try {
+      const cands = await structureThesis({
+        ticker: t,
+        chain,
+        posterior,
+        spot,
+        catalystDate: nextCatalyst?.date ?? null,
+        memo: memo ? { bear: bearPrice, base: basePrice, bull: bullPrice } : null,
+        history,
+        forecastVol: garchFit?.forecastVol30dAnnualized ?? quant?.annualizedVol ?? null,
+        vrp,
+        regimeStressed,
+        maxCandidates: 3,
+      });
+      const best = cands[0];
+      if (best) {
+        optionsStructureBlock = {
+          strategy: best.strategy,
+          label: best.label,
+          direction: best.direction,
+          expiry: best.expiry,
+          dte: Math.round(best.dte),
+          legs: best.legs.map((l) => ({ right: l.right, action: l.action, strike: l.strike, expiry: l.expiry, qty: l.qty, mid: l.mid })),
+          netDebit: best.netDebit,
+          maxLoss: best.maxLoss,
+          maxGain: best.maxGain,
+          breakevens: best.breakevens,
+          pop: best.pop,
+          evPctOnRisk: best.evPctOnRisk,
+          greeks: best.greeks,
+          rationale: best.rationale,
+          alternatives: cands.slice(1).map((c) => ({ label: c.label, strategy: c.strategy, pop: c.pop, evPctOnRisk: c.evPctOnRisk, maxLoss: c.maxLoss })),
+        };
+      }
+    } catch {
+      // strategist failure degrades to null — never blocks the directive
     }
   }
 
@@ -995,6 +1046,7 @@ export async function computeDirective(ticker: string): Promise<Directive> {
     ev: evBlock,
     sizing: sizingBlock,
     hedge: hedgeBlock,
+    optionsStructure: optionsStructureBlock,
     catalyst: nextCatalyst
       ? { title: nextCatalyst.title, date: nextCatalyst.date, daysOut: daysBetween(computedAtMs, nextCatalyst.date) }
       : null,

@@ -15,6 +15,7 @@ import { getQuotes } from "@/lib/market";
 import { refreshSignals } from "@/lib/signals";
 import { modelFor } from "@/lib/models";
 import { CONSTITUTION } from "@/lib/athena";
+import { runOptionsMonitor } from "@/lib/options/monitor";
 
 // Market-signal alert thresholds (kept high — the queue is for attention, not noise).
 const SIGNAL_UNUSUAL_VOLUME_Z = 2.5;
@@ -491,6 +492,23 @@ export async function runNightVisionScan(
         );
       }
     }
+  }
+
+  // ---- Options book sweep: DTE/roll, take-profit, assignment, breakeven, IV crush ----
+  try {
+    const opt = await runOptionsMonitor((e) =>
+      emit({
+        stage: e.stage === "alert" ? "alert" : e.stage === "error" ? "error" : "signal",
+        ticker: e.ticker,
+        message: e.message,
+      }),
+    );
+    alertsRaised += opt.alertsRaised;
+  } catch (err) {
+    emit({
+      stage: "error",
+      message: `Options sweep failed: ${err instanceof Error ? err.message : "unknown error"}`,
+    });
   }
 
   emit({

@@ -43,6 +43,7 @@ export const AGENTS = [
   "chat",
   "investigator",
   "logic",
+  "options_strategist",
   "augur_extract",
   "augur_judge",
   "embeddings",
@@ -78,6 +79,9 @@ export const ROUTING: Record<Agent, Route[]> = {
   chat: [anthropic(IDS.SONNET), openai(IDS.GPT), xai(IDS.GROK)],
   investigator: [anthropic(IDS.FABLE), openai(IDS.GPT), xai(IDS.GROK)],
   logic: [openai(IDS.GPT_PRO), anthropic(IDS.OPUS), xai(IDS.GROK)],
+  // The Options Strategist only ever polishes deterministic structure prose,
+  // never invents numbers — same discipline as the Oracle's synthesis polish.
+  options_strategist: [openai(IDS.GPT_PRO), anthropic(IDS.OPUS), xai(IDS.GROK)],
   augur_extract: [anthropic(IDS.FABLE), openai(IDS.GPT), xai(IDS.GROK)],
   augur_judge: [openai(IDS.GPT), anthropic(IDS.FABLE), xai(IDS.GROK)],
   embeddings: [openai(IDS.EMBEDDING)],

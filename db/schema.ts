@@ -592,3 +592,116 @@ export const jobs = pgTable("jobs", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
+
+// ---------------------------------------------------------------------------
+// OPTIONS OVERLAY DESK — the derivatives branch. Every dollar figure below is
+// per ONE structure-lot (one contract per leg = 100 shares), so qty scales
+// linearly. A "structure" is a multi-leg, strictly defined-risk expression of
+// the same thesis the equity book carries; `option_legs` holds its legs.
+// NOTE: namespaced `option_*` because `positions` is owned by the equity book
+// and `augury_positions` by the trader-intel module — this is the third book.
+// ---------------------------------------------------------------------------
+
+export const optionStructures = pgTable("option_structures", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").references(() => companies.id),
+  ticker: text("ticker").notNull(),
+  memoId: integer("memo_id").references(() => memos.id),
+  directiveId: integer("directive_id"), // soft link to directives.id (no FK)
+  strategy: text("strategy").notNull(), // long_call | long_put | call_debit_spread | put_debit_spread | put_credit_spread | call_credit_spread | call_calendar | pmcc | long_straddle | long_strangle | iron_condor | collar
+  direction: text("direction"), // bullish | bearish | neutral | hedge
+  status: text("status").notNull().default("recommended"), // watching | recommended | open | closed
+  qty: integer("qty").notNull().default(1), // number of structure-lots
+  netDebit: real("net_debit"), // per 1-lot $ — positive = debit paid, negative = credit received
+  maxLoss: real("max_loss"), // per 1-lot $ — positive magnitude of worst case
+  maxGain: real("max_gain"), // per 1-lot $ — null = unbounded (e.g. long call)
+  breakevens: text("breakevens"), // JSON number[]
+  pop: real("pop"), // probability of profit at the eval horizon, from the RND
+  evPct: real("ev_pct"), // real-world (posterior-drifted MC) EV as % of capital at risk
+  evRndPct: real("ev_rnd_pct"), // risk-neutral EV as % of capital at risk (≈ fair-value check)
+  capitalAtRiskPct: real("capital_at_risk_pct"), // maxLoss × qty / NAV, percent — at entry
+  entryGreeks: text("entry_greeks"), // JSON { delta, gamma, vega, theta } per 1-lot at entry
+  entryUnderlying: real("entry_underlying"), // spot at entry
+  expiry: text("expiry"), // primary (near-leg) expiry, ISO
+  rationale: text("rationale"),
+  bindingConstraint: text("binding_constraint"), // sizing constraint that set qty
+  createdBy: text("created_by"),
+  exitNetValue: real("exit_net_value"), // per 1-lot $ to close at exit
+  exitUnderlying: real("exit_underlying"),
+  realizedPnl: real("realized_pnl"), // total realized $ at close (all lots)
+  closedAt: timestamp("closed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+}, (t) => ({
+  byTicker: index("option_structures_ticker_idx").on(t.ticker, t.status),
+}));
+
+export const optionLegs = pgTable("option_legs", {
+  id: serial("id").primaryKey(),
+  structureId: integer("structure_id").notNull().references(() => optionStructures.id),
+  right: text("right").notNull(), // C | P
+  action: text("action").notNull(), // long | short
+  strike: real("strike").notNull(),
+  expiry: text("expiry").notNull(), // ISO date
+  qty: integer("qty").notNull().default(1), // contracts per structure-lot
+  entryMid: real("entry_mid"), // per-share premium at entry
+  entryIv: real("entry_iv"),
+  entryDelta: real("entry_delta"),
+  entryGamma: real("entry_gamma"),
+  entryVega: real("entry_vega"),
+  entryTheta: real("entry_theta"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+export const optionPostmortems = pgTable("option_postmortems", {
+  id: serial("id").primaryKey(),
+  structureId: integer("structure_id").references(() => optionStructures.id),
+  companyId: integer("company_id").references(() => companies.id),
+  ticker: text("ticker").notNull(),
+  outcome: text("outcome").notNull(), // win | loss | scratch
+  volViewRight: text("vol_view_right").notNull(), // right | wrong | mixed — was the IV/VRP read correct
+  directionRight: text("direction_right").notNull(), // right | wrong | mixed
+  structureChoiceRight: boolean("structure_choice_right").notNull().default(false), // would another structure have paid more
+  thetaCapture: text("theta_capture"), // narrative on decay vs the plan
+  rollHistory: text("roll_history"), // JSON of any rolls
+  narrative: text("narrative").notNull(),
+  lessons: text("lessons"), // JSON string[]
+  createdBy: text("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// Per-structure backtest point: realized structure P&L vs the RND-implied EV
+// AND vs simply holding the stock over the same window (the overlay's alpha).
+export const optionBacktests = pgTable("option_backtests", {
+  id: serial("id").primaryKey(),
+  structureId: integer("structure_id").notNull().references(() => optionStructures.id),
+  ticker: text("ticker").notNull(),
+  evalDate: text("eval_date"), // ISO date of the mark
+  evalUnderlying: real("eval_underlying"),
+  structureValue: real("structure_value"), // per 1-lot $ mark-to-model
+  structurePnlPct: real("structure_pnl_pct"), // % of capital at risk
+  stockOnlyPnlPct: real("stock_only_pnl_pct"), // hypothetical underlying-only return over the window
+  overlayAlphaPct: real("overlay_alpha_pct"), // structurePnlPct − stockOnlyPnlPct
+  ivAtEntry: real("iv_at_entry"),
+  ivAtEval: real("iv_at_eval"),
+  outcome: text("outcome"), // right | wrong | partial | inconclusive
+  notes: text("notes"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// Materialized structure-selection scorecard: did the strategist's structure
+// choice in a given vol regime actually pay? Upsert target keyed by the pair.
+export const optionScorecards = pgTable("option_scorecards", {
+  id: serial("id").primaryKey(),
+  strategy: text("strategy"), // null = all strategies
+  volRegime: text("vol_regime"), // cheap | fair | rich (VRP bucket); null = all regimes
+  hitRate: real("hit_rate"),
+  avgOverlayAlphaPct: real("avg_overlay_alpha_pct"),
+  avgStructurePnlPct: real("avg_structure_pnl_pct"),
+  sampleSize: integer("sample_size").notNull().default(0),
+  data: text("data"), // JSON detail
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+}, (t) => ({
+  uniqScope: unique().on(t.strategy, t.volRegime),
+}));
